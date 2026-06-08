@@ -97,8 +97,14 @@ func TestResolveEndpoint_ClaudeCodeOAuthToken(t *testing.T) {
 	if ep.Source != "Claude Code OAuth token" {
 		t.Errorf("expected source %q, got %q", "Claude Code OAuth token", ep.Source)
 	}
-	if got := ep.Headers["anthropic-beta"]; got != "oauth-2025-04-20" {
-		t.Errorf("expected oauth beta header, got %q", got)
+	if got := ep.Headers["anthropic-beta"]; got != "claude-code-20250219,oauth-2025-04-20" {
+		t.Errorf("expected Claude Code oauth beta header, got %q", got)
+	}
+	if len(ep.SystemPrompts) != 1 {
+		t.Fatalf("expected one system prompt, got %d", len(ep.SystemPrompts))
+	}
+	if ep.SystemPrompts[0] != "You are Claude Code, Anthropic's official CLI for Claude." {
+		t.Errorf("unexpected system prompt %q", ep.SystemPrompts[0])
 	}
 }
 

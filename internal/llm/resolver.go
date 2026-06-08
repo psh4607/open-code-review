@@ -11,13 +11,14 @@ import (
 
 // ResolvedEndpoint holds the resolved LLM endpoint configuration.
 type ResolvedEndpoint struct {
-	URL       string
-	Token     string
-	Model     string
-	Protocol  string         // "anthropic" or "openai"
-	Source    string         // human-readable config source label
-	ExtraBody map[string]any // vendor-specific request body fields
-	Headers   map[string]string
+	URL           string
+	Token         string
+	Model         string
+	Protocol      string         // "anthropic" or "openai"
+	Source        string         // human-readable config source label
+	ExtraBody     map[string]any // vendor-specific request body fields
+	Headers       map[string]string
+	SystemPrompts []string
 }
 
 // Environment variable names for OCR-specific configuration.
@@ -37,7 +38,8 @@ const (
 
 const (
 	envClaudeCodeOAuthToken = "CLAUDE_CODE_OAUTH_TOKEN"
-	claudeCodeOAuthBeta     = "oauth-2025-04-20"
+	claudeCodeOAuthBeta     = "claude-code-20250219,oauth-2025-04-20"
+	claudeCodeSystemPrompt  = "You are Claude Code, Anthropic's official CLI for Claude."
 	defaultAnthropicURL     = "https://api.anthropic.com/v1/messages"
 )
 
@@ -174,11 +176,12 @@ func tryClaudeCodeOAuthEnv() (ResolvedEndpoint, bool, error) {
 	}
 
 	return ResolvedEndpoint{
-		URL:      url,
-		Token:    token,
-		Model:    model,
-		Protocol: "anthropic",
-		Source:   "Claude Code OAuth token",
+		URL:           url,
+		Token:         token,
+		Model:         model,
+		Protocol:      "anthropic",
+		Source:        "Claude Code OAuth token",
+		SystemPrompts: []string{claudeCodeSystemPrompt},
 		Headers: map[string]string{
 			"anthropic-beta": claudeCodeOAuthBeta,
 		},

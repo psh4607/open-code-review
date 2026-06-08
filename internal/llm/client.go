@@ -179,12 +179,13 @@ type FunctionDef struct {
 
 // ClientConfig holds configuration for connecting to an LLM service.
 type ClientConfig struct {
-	URL       string         // Full API endpoint URL
-	APIKey    string         // Bearer token / API key
-	Model     string         // Default model override
-	Timeout   time.Duration  // Request timeout
-	ExtraBody map[string]any // Vendor-specific fields merged into every request body
-	Headers   map[string]string
+	URL           string         // Full API endpoint URL
+	APIKey        string         // Bearer token / API key
+	Model         string         // Default model override
+	Timeout       time.Duration  // Request timeout
+	ExtraBody     map[string]any // Vendor-specific fields merged into every request body
+	Headers       map[string]string
+	SystemPrompts []string
 }
 
 // --- Factory ---
@@ -193,11 +194,12 @@ type ClientConfig struct {
 // protocol: "anthropic" -> AnthropicClient, anything else -> OpenAIClient.
 func NewLLMClient(ep ResolvedEndpoint) LLMClient {
 	cfg := ClientConfig{
-		URL:       ep.URL,
-		APIKey:    ep.Token,
-		Model:     ep.Model,
-		ExtraBody: ep.ExtraBody,
-		Headers:   ep.Headers,
+		URL:           ep.URL,
+		APIKey:        ep.Token,
+		Model:         ep.Model,
+		ExtraBody:     ep.ExtraBody,
+		Headers:       ep.Headers,
+		SystemPrompts: ep.SystemPrompts,
 	}
 	if ep.Protocol == "anthropic" {
 		return NewAnthropicClient(cfg)
@@ -529,6 +531,12 @@ func (c *AnthropicClient) buildAnthropicParams(model string, req ChatRequest) an
 	var systemBlocks []anthropic.TextBlockParam
 	var messages []anthropic.MessageParam
 	var pendingToolResults []Message
+
+	for _, prompt := range c.cfg.SystemPrompts {
+		if prompt != "" {
+			systemBlocks = append(systemBlocks, anthropic.TextBlockParam{Text: prompt})
+		}
+	}
 
 	flushToolResults := func() {
 		if len(pendingToolResults) == 0 {

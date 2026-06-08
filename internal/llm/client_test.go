@@ -160,6 +160,38 @@ func TestBuildAnthropicParams_CacheControl(t *testing.T) {
 	})
 }
 
+func TestBuildAnthropicParams_ConfigSystemPrompts(t *testing.T) {
+	client := NewAnthropicClient(ClientConfig{
+		URL:           "https://api.anthropic.com",
+		SystemPrompts: []string{"You are Claude Code, Anthropic's official CLI for Claude."},
+	})
+
+	req := ChatRequest{
+		Messages: []Message{
+			{Role: "system", Content: "You are a code reviewer."},
+			{Role: "user", Content: "Review this code."},
+		},
+	}
+
+	params := client.buildAnthropicParams("claude-sonnet-4-6", req)
+
+	if len(params.System) != 2 {
+		t.Fatalf("expected 2 system blocks, got %d", len(params.System))
+	}
+	if params.System[0].Text != "You are Claude Code, Anthropic's official CLI for Claude." {
+		t.Errorf("unexpected prepended system prompt %q", params.System[0].Text)
+	}
+	if params.System[0].CacheControl.Type != "" {
+		t.Errorf("prepended system prompt CacheControl.Type = %q, want empty", params.System[0].CacheControl.Type)
+	}
+	if params.System[1].Text != "You are a code reviewer." {
+		t.Errorf("unexpected request system prompt %q", params.System[1].Text)
+	}
+	if params.System[1].CacheControl.Type != "ephemeral" {
+		t.Errorf("last system block CacheControl.Type = %q, want %q", params.System[1].CacheControl.Type, "ephemeral")
+	}
+}
+
 func TestAnthropicClient_SendsExtraHeaders(t *testing.T) {
 	var gotAuth string
 	var gotBeta string
