@@ -55,6 +55,7 @@ func TestResolveEndpoint_CCEnvCleanModelUnchanged(t *testing.T) {
 	t.Setenv("OCR_LLM_URL", "")
 	t.Setenv("OCR_LLM_TOKEN", "")
 	t.Setenv("OCR_LLM_MODEL", "")
+	t.Setenv("CLAUDE_CODE_OAUTH_TOKEN", "")
 	t.Setenv("ANTHROPIC_BASE_URL", "https://api.example.com")
 	t.Setenv("ANTHROPIC_AUTH_TOKEN", "test-token")
 	t.Setenv("ANTHROPIC_MODEL", "claude-opus-4-7")
@@ -65,6 +66,39 @@ func TestResolveEndpoint_CCEnvCleanModelUnchanged(t *testing.T) {
 	}
 	if ep.Model != "claude-opus-4-7" {
 		t.Errorf("expected model %q, got %q", "claude-opus-4-7", ep.Model)
+	}
+}
+
+func TestResolveEndpoint_ClaudeCodeOAuthToken(t *testing.T) {
+	t.Setenv("OCR_LLM_URL", "")
+	t.Setenv("OCR_LLM_TOKEN", "")
+	t.Setenv("OCR_LLM_MODEL", "")
+	t.Setenv("ANTHROPIC_BASE_URL", "")
+	t.Setenv("ANTHROPIC_AUTH_TOKEN", "")
+	t.Setenv("ANTHROPIC_MODEL", "claude-sonnet-4-6[1m]")
+	t.Setenv("CLAUDE_CODE_OAUTH_TOKEN", "test-oauth-token")
+
+	ep, err := ResolveEndpoint(filepath.Join(t.TempDir(), "nonexistent.json"))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if ep.URL != "https://api.anthropic.com/v1/messages" {
+		t.Errorf("expected URL %q, got %q", "https://api.anthropic.com/v1/messages", ep.URL)
+	}
+	if ep.Token != "test-oauth-token" {
+		t.Errorf("expected token from CLAUDE_CODE_OAUTH_TOKEN")
+	}
+	if ep.Model != "claude-sonnet-4-6" {
+		t.Errorf("expected model %q, got %q", "claude-sonnet-4-6", ep.Model)
+	}
+	if ep.Protocol != "anthropic" {
+		t.Errorf("expected protocol %q, got %q", "anthropic", ep.Protocol)
+	}
+	if ep.Source != "Claude Code OAuth token" {
+		t.Errorf("expected source %q, got %q", "Claude Code OAuth token", ep.Source)
+	}
+	if got := ep.Headers["anthropic-beta"]; got != "oauth-2025-04-20" {
+		t.Errorf("expected oauth beta header, got %q", got)
 	}
 }
 

@@ -184,6 +184,7 @@ type ClientConfig struct {
 	Model     string         // Default model override
 	Timeout   time.Duration  // Request timeout
 	ExtraBody map[string]any // Vendor-specific fields merged into every request body
+	Headers   map[string]string
 }
 
 // --- Factory ---
@@ -196,6 +197,7 @@ func NewLLMClient(ep ResolvedEndpoint) LLMClient {
 		APIKey:    ep.Token,
 		Model:     ep.Model,
 		ExtraBody: ep.ExtraBody,
+		Headers:   ep.Headers,
 	}
 	if ep.Protocol == "anthropic" {
 		return NewAnthropicClient(cfg)
@@ -483,15 +485,20 @@ func NewAnthropicClient(cfg ClientConfig) *AnthropicClient {
 
 	sdkBaseURL := strings.TrimSuffix(strings.TrimRight(cfg.URL, "/"), "/v1/messages")
 
+	opts := []option.RequestOption{
+		option.WithAuthToken(cfg.APIKey),
+		option.WithBaseURL(sdkBaseURL),
+		option.WithMaxRetries(5),
+		option.WithHeader("User-Agent", userAgent("claude")),
+		option.WithRequestTimeout(cfg.Timeout),
+	}
+	for k, v := range cfg.Headers {
+		opts = append(opts, option.WithHeader(k, v))
+	}
+
 	return &AnthropicClient{
 		cfg: cfg,
-		sdk: anthropic.NewClient(
-			option.WithAuthToken(cfg.APIKey),
-			option.WithBaseURL(sdkBaseURL),
-			option.WithMaxRetries(5),
-			option.WithHeader("User-Agent", userAgent("claude")),
-			option.WithRequestTimeout(cfg.Timeout),
-		),
+		sdk: anthropic.NewClient(opts...),
 	}
 }
 

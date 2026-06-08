@@ -1,6 +1,10 @@
 package llm
 
 import (
+	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	anthropic "github.com/anthropics/anthropic-sdk-go"
@@ -154,6 +158,55 @@ func TestBuildAnthropicParams_CacheControl(t *testing.T) {
 			t.Errorf("params.CacheControl.Type = %q, want empty", params.CacheControl.Type)
 		}
 	})
+}
+
+func TestAnthropicClient_SendsExtraHeaders(t *testing.T) {
+	var gotAuth string
+	var gotBeta string
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		gotBeta = r.Header.Get("anthropic-beta")
+
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"id":            "msg_test",
+			"type":          "message",
+			"role":          "assistant",
+			"model":         "claude-sonnet-4-6",
+			"content":       []map[string]any{{"type": "text", "text": "ok"}},
+			"stop_reason":   "end_turn",
+			"stop_sequence": nil,
+			"usage": map[string]any{
+				"input_tokens":  1,
+				"output_tokens": 1,
+			},
+		})
+	}))
+	defer server.Close()
+
+	client := NewAnthropicClient(ClientConfig{
+		URL:    server.URL,
+		APIKey: "test-oauth-token",
+		Model:  "claude-sonnet-4-6",
+		Headers: map[string]string{
+			"anthropic-beta": "oauth-2025-04-20",
+		},
+	})
+
+	_, err := client.CompletionsWithCtx(context.Background(), ChatRequest{
+		Messages:  []Message{{Role: "user", Content: "ping"}},
+		MaxTokens: 16,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if gotAuth != "Bearer test-oauth-token" {
+		t.Errorf("expected bearer auth header, got %q", gotAuth)
+	}
+	if gotBeta != "oauth-2025-04-20" {
+		t.Errorf("expected oauth beta header, got %q", gotBeta)
+	}
 }
 
 func TestBuildAnthropicParams_CacheControl_NoTools(t *testing.T) {
