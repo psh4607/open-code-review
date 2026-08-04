@@ -14,5 +14,16 @@
   "**/*Tests.java",
   "**/*_test.rs",
   "**/oh_modules/**",
-  "**/*.test.ets"
+  "**/*.test.ets",
+  "**/test/**/*.jl",
+
+  "**/__snapshots__/**",
+  "**/*.snap",
+  "**/testdata/**",
+  "**/fixtures/**",
+  "**/*.generated.*",
+  "**/*.gen.go",
+  "**/*.pb.go",
+  "**/*.pb.cc",
+  "**/*.pb.h"
 ]

@@ -14,12 +14,40 @@ func TestIsAllowedExt(t *testing.T) {
 		{".java", true},
 		{".ts", true},
 		{".tsx", true},
+		{".astro", true},
+		{".ASTRO", true},
 		{".py", true},
+		{".php", true},
+		{".PHP", true},
+		{".phtml", true},
+		{".PHTML", true},
 		{".rs", true},
 		{".ets", true},
 		{".ETS", true},
 		{".json5", true},
 		{".JSON5", true},
+		{".ftl", true},
+		{".FTL", true},
+		{".ftlh", true},
+		{".FTLH", true},
+		{".ftlx", true},
+		{".FTLX", true},
+		{".graphql", true},
+		{".GRAPHQL", true},
+		{".gql", true},
+		{".GQL", true},
+		{".prisma", true},
+		{".PRISMA", true},
+		{".jl", true},
+		{".JL", true},
+		{".hcl", true},
+		{".HCL", true},
+		{".tfvars", true},
+		{".TFVARS", true},
+		{".bicep", true},
+		{".BICEP", true},
+		{".proto", true},
+		{".PROTO", true},
 		{".txt", false},
 		{".md", false},
 		{".png", false},
@@ -88,11 +116,46 @@ func TestIsExcludedPath(t *testing.T) {
 		{"rust test file", "src/parser_test.rs", true},
 		{"rust non-test", "src/parser.rs", false},
 
+		// Prisma schemas have no conventional default test-file exclusion.
+		{"prisma schema", "prisma/schema.prisma", false},
+
 		// HarmonyOS oh_modules and test files
 		{"oh_modules root", "oh_modules/some_lib/index.ets", true},
 		{"oh_modules nested", "entry/oh_modules/lib/index.ets", true},
 		{"ets test file", "entry/src/test/Component.test.ets", true},
 		{"ets non-test", "entry/src/main/Component.ets", false},
+
+		// Julia test files
+		{"julia test file", "test/runtests.jl", true},
+		{"julia test nested", "MyPkg/test/unit/foo.jl", true},
+		{"julia non-test", "src/model.jl", false},
+
+		// Snapshot files
+		{"jest snapshot dir", "src/__snapshots__/App.test.js.snap", true},
+		{"snap file", "src/components/Button.snap", true},
+		{"snap deeply nested", "packages/ui/src/__snapshots__/util.snap", true},
+
+		// Test data directories
+		{"testdata go", "internal/parser/testdata/input.json", true},
+		{"testdata nested", "pkg/a/b/testdata/golden.txt", true},
+		{"fixtures dir", "test/fixtures/sample.json", true},
+		{"fixtures nested", "spec/fixtures/users.yml", true},
+
+		// Generated code
+		{"generated go", "api/types.generated.go", true},
+		{"generated ts", "src/graphql/schema.generated.ts", true},
+		{"gen go", "proto/message.gen.go", true},
+		{"pb go", "api/v1/service.pb.go", true},
+		{"pb cc", "proto/message.pb.cc", true},
+		{"pb h", "proto/message.pb.h", true},
+
+		// Non-matches for new patterns
+		{"snapshots in name", "src/snapshots/util.ts", false},
+		{"testdata in filename", "src/testdata.go", false},
+		{"fixtures in filename", "src/fixtures.ts", false},
+		{"generated not dotted", "src/generated/code.go", false},
+		{"gen not suffix", "src/gen/util.go", false},
+		{"pb not suffix", "src/pb/client.go", false},
 
 		// Case insensitive
 		{"case insensitive go", "Foo/Bar_Test.go", true},

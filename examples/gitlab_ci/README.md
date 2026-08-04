@@ -10,20 +10,20 @@ MR Created/Updated → GitLab Pipeline Triggered → OCR Reviews Diff → Discus
 
 1. When a Merge Request is opened or updated, the pipeline triggers
 2. It installs OCR via npm in a `node:20` Docker image
-3. Runs `ocr review --from origin/<target> --to origin/<source> --format json` to analyze the diff
+3. Runs `ocr review --from origin/<target> --to <commit_sha> --format json --audience agent` to analyze the diff (uses commit SHA to support fork MRs)
 4. Parses the JSON output and posts inline discussions on the MR using GitLab's Discussions API
 
 ## Setup
 
-### 1. Copy the pipeline file
+### 1. Copy the pipeline and script files
 
-Copy `.gitlab-ci.yml` to your repository root (or include it via `include:`):
+Copy **both** `.gitlab-ci.yml` and `post_review.py` to your repository root (or a subdirectory — adjust the `python3 post_review.py` path in the YAML if you place the script elsewhere):
 
 ```bash
-cp .gitlab-ci.yml /path/to/your/repo/.gitlab-ci.yml
+cp .gitlab-ci.yml post_review.py /path/to/your/repo/
 ```
 
-Or use GitLab's `include` feature in your existing `.gitlab-ci.yml`:
+Or use GitLab's `include` feature in your existing `.gitlab-ci.yml` (the script path is relative to the pipeline file's location):
 
 ```yaml
 include:
@@ -38,8 +38,8 @@ Go to your project's **Settings → CI/CD → Variables** and add:
 |----------|----------|--------|-------------|
 | `OCR_LLM_URL` | Yes | No | LLM API endpoint URL (e.g., `https://api.openai.com/v1/chat/completions`) |
 | `OCR_LLM_AUTH_TOKEN` | Yes | Yes | API authentication token |
-| `OCR_LLM_MODEL` | No | No | Model name (defaults to `gpt-4o`) |
-| `GITLAB_API_TOKEN` | Yes | Yes | GitLab access token with `api` scope |
+| `OCR_LLM_MODEL` | Yes | No | Model name (e.g., `gpt-4o`) — OCR has no built-in default model and fails when this is unset |
+| `GITLAB_API_TOKEN` | No | Yes | GitLab access token with `api` scope (falls back to `CI_JOB_TOKEN` if not set) |
 
 > **Note:** GitLab CI/CD does not support variables with values shorter than 8 characters, so `use_anthropic` cannot be set as a CI variable. The pipeline sets it to `false` by default. If you need to use Anthropic Claude models, you'll need to modify the `.gitlab-ci.yml` script directly.
 >
@@ -53,7 +53,7 @@ You need a token with `api` scope to post discussions on MRs. Options:
 - **Personal Access Token**: User Settings → Access Tokens → Create with `api` scope
 - **Group Access Token**: For organization-wide usage
 
-> **Note:** The built-in `CI_JOB_TOKEN` does NOT have sufficient permissions to create MR discussions, which is why a separate token is needed.
+> **Note:** The built-in `CI_JOB_TOKEN` has limited API scope and may not support all discussion features (e.g., creating new threads on older GitLab versions). If `GITLAB_API_TOKEN` is not set, the pipeline falls back to `CI_JOB_TOKEN` automatically — but for best results, a dedicated token with `api` scope is recommended.
 >
 > **Tip:** For Project Access Tokens and Group Access Tokens, the token name determines the bot name shown in MR discussions. For example, naming your token `OpenCodeReview Bot` will make review comments appear as posted by `OpenCodeReview Bot`.
 
@@ -62,8 +62,8 @@ You need a token with `api` scope to post discussions on MRs. Options:
 When an MR is reviewed, comments appear as:
 
 - **Inline discussions**: Directly on the changed lines in the MR diff view
-- **Summary note**: A final note summarizing the total number of issues found
-- **Fallback notes**: If inline posting fails for specific comments, they appear as regular MR notes with file/line references
+- **Summary note**: A final note summarizing the total number of issues found and how they were posted (inline, no line info, routed by policy, or failed)
+- **Fallback notes**: Comments without line info, routed by category/severity policy, or failed inline posts appear as separate MR notes
 
 ### Inline Discussion Example
 
@@ -95,8 +95,25 @@ Use the `--rule` flag to pass a custom rules JSON file:
 
 ```yaml
 script:
-  - ocr review --rule ./my-rules.json --from origin/$CI_MERGE_REQUEST_TARGET_BRANCH_NAME --to origin/$CI_MERGE_REQUEST_SOURCE_BRANCH_NAME
+  - ocr review --rule ./my-rules.json --from origin/$CI_MERGE_REQUEST_TARGET_BRANCH_NAME --to $CI_COMMIT_SHA
 ```
+
+### Adjust retry and delay settings
+
+When posting review discussions, the script includes rate-limit handling with exponential backoff (with jitter), `Retry-After` header support, and proactive throttling based on GitLab's `RateLimit-Remaining` response header. All API requests — including summary notes and MR version fetches — use the same retry logic. See [GitLab Rate Limits](https://docs.gitlab.com/security/rate_limits/) for details on GitLab's rate-limiting policies and recommended handling. You can configure the retry and delay behavior via **CI/CD Variables** (Settings → CI/CD → Variables):
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `OCR_RETRY_BASE_DELAY` | `2000` | Base delay (ms) for exponential backoff when a rate-limit error is hit |
+| `OCR_MAX_RETRIES` | `3` | Maximum retry attempts per discussion when rate-limited |
+| `OCR_MAX_RETRY_DELAY` | `60000` | Maximum delay (ms) per single retry, caps both `Retry-After` and backoff |
+| `OCR_SUCCESS_DELAY` | `2000` | Delay (ms) after a successful discussion post to pace subsequent requests |
+| `OCR_FAILURE_DELAY` | `1000` | Delay (ms) after a non-rate-limit failure to pace subsequent requests |
+| `OCR_RATE_LIMIT_THRESHOLD` | `10` | Proactively slow down when GitLab `RateLimit-Remaining` is at/below this value (set `0` to disable) |
+| `OCR_ROUTE_SEVERITY_BELOW` | _(empty)_ | Optional severity threshold (`critical`, `high`, `medium`, `low`) that routes findings at-or-below it from inline comments to summary notes (fail-open: never drops a finding). Empty or unknown values disable severity routing. |
+| `OCR_ROUTE_CATEGORIES` | _(empty)_ | Optional comma-separated categories (`bug`, `security`, `performance`, `maintainability`, `test`, `style`, `documentation`, `other`) routed from inline to summary notes. Unknown tokens are ignored. Combine with `OCR_ROUTE_SEVERITY_BELOW` to route on either condition. |
+
+These variables are optional — if not configured, sensible defaults are used. Consider increasing delays for self-hosted GitLab instances with aggressive rate-limit configurations or for large MRs that generate numerous review comments. The `OCR_RATE_LIMIT_THRESHOLD` variable enables proactive throttling: when GitLab reports low remaining quota in the `RateLimit-Remaining` response header, the script automatically doubles the pacing delay to avoid hitting 429 errors.
 
 ### Limit concurrency
 
@@ -104,7 +121,7 @@ Adjust the `--concurrency` flag for large MRs to control the number of concurren
 
 ```yaml
 script:
-  - ocr review --concurrency 5 --from origin/$CI_MERGE_REQUEST_TARGET_BRANCH_NAME --to origin/$CI_MERGE_REQUEST_SOURCE_BRANCH_NAME
+  - ocr review --concurrency 5 --from origin/$CI_MERGE_REQUEST_TARGET_BRANCH_NAME --to $CI_COMMIT_SHA
 ```
 
 ### Provide background context
@@ -113,7 +130,7 @@ Use the `--background` flag to pass additional context that helps OCR better und
 
 ```yaml
 script:
-  - ocr review --background "$CI_MERGE_REQUEST_TITLE" --from origin/$CI_MERGE_REQUEST_TARGET_BRANCH_NAME --to origin/$CI_MERGE_REQUEST_SOURCE_BRANCH_NAME
+  - ocr review --background "$CI_MERGE_REQUEST_TITLE" --from origin/$CI_MERGE_REQUEST_TARGET_BRANCH_NAME --to $CI_COMMIT_SHA
 ```
 
 This is particularly useful when your MR titles follow semantic conventions (e.g., `feat(auth): add OAuth2 support`) that clearly summarize what the MR implements. The background information helps OCR provide more relevant and context-aware review comments.
@@ -130,11 +147,13 @@ script:
   - npm install -g @alibaba-group/open-code-review
 
   # Configure OCR
-  - mkdir -p ~/.open-code-review
   - |
-    ocr config set llm.url $OCR_LLM_URL
-    ocr config set llm.auth_token $OCR_LLM_AUTH_TOKEN
-    ocr config set llm.model $OCR_LLM_MODEL
+    : "${OCR_LLM_URL:?set OCR_LLM_URL in Settings -> CI/CD -> Variables}"
+    : "${OCR_LLM_AUTH_TOKEN:?set OCR_LLM_AUTH_TOKEN in Settings -> CI/CD -> Variables}"
+    : "${OCR_LLM_MODEL:?set OCR_LLM_MODEL in Settings -> CI/CD -> Variables}"
+    ocr config set llm.url "$OCR_LLM_URL"
+    ocr config set llm.auth_token "$OCR_LLM_AUTH_TOKEN"
+    ocr config set llm.model "$OCR_LLM_MODEL"
     ocr config set llm.use_anthropic false
     ocr config set llm.extra_body '{"thinking": {"type": "disabled"}}'
 
@@ -168,11 +187,13 @@ script:
 
     # No existing review found - run OCR
     print("🔍 No existing OCR review found. Running review...")
+    COMMIT_SHA = os.environ["CI_COMMIT_SHA"]
     result = subprocess.run([
         "ocr", "review",
         "--from", f"origin/{TARGET_BRANCH}",
-        "--to", f"origin/{SOURCE_BRANCH}",
-        "--format", "json"
+        "--to", COMMIT_SHA,
+        "--format", "json",
+        "--audience", "agent"
     ], capture_output=True, text=True)
 
     # Save output for the posting script
@@ -185,10 +206,7 @@ script:
     WRAPPER_SCRIPT
 
   # Post review comments to MR
-  - |
-    python3 << 'PYTHON_SCRIPT'
-    ...existing post script...
-    PYTHON_SCRIPT
+  - python3 post_review.py /tmp/ocr-result.json
 ```
 
 The key logic: the Python wrapper checks for existing OCR comments before running `ocr review`. If found, it exits early with `sys.exit(0)` before consuming any LLM tokens. To re-trigger a review, users can manually delete the previous OCR comments.
@@ -262,6 +280,19 @@ Add verbose output to the review step:
 script:
   - cat /tmp/ocr-result.json
   - cat /tmp/ocr-stderr.log
+```
+
+## Testing
+
+The posting logic (retry, backoff, rate-limit throttling, inline→fallback→summary flow) is unit-tested with no network access and no wall-clock sleep cost. Tests use only the standard-library `unittest`.
+
+```bash
+# From the example directory
+cd examples/gitlab_ci
+python3 post_review_test.py
+
+# From the repo root
+python3 -m unittest discover -s examples/gitlab_ci -p '*_test.py'
 ```
 
 

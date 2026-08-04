@@ -1,11 +1,16 @@
 // Package llm provides LLM client interfaces supporting multiple protocols.
-// Supported protocols: Anthropic Messages API, OpenAI Chat Completions API.
+// Supported protocols (canonical names, see protocol.go):
+//   - "anthropic" — Anthropic Messages API
+//   - "openai" — OpenAI Chat Completions API
+//   - "openai-responses" — OpenAI Responses API
 package llm
 
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"strings"
 	"sync"
 	"time"
@@ -179,28 +184,44 @@ type FunctionDef struct {
 
 // ClientConfig holds configuration for connecting to an LLM service.
 type ClientConfig struct {
-	URL       string         // Full API endpoint URL
-	APIKey    string         // Bearer token / API key
-	Model     string         // Default model override
-	Timeout   time.Duration  // Request timeout
-	ExtraBody map[string]any // Vendor-specific fields merged into every request body
+	URL          string            // Full API endpoint URL
+	APIKey       string            // Bearer token / API key
+	Model        string            // Default model override
+	AuthHeader   string            // Auth header name: "x-api-key", "authorization", or empty for protocol default
+	Timeout      time.Duration     // Request timeout
+	ExtraBody    map[string]any    // Vendor-specific fields merged into every request body
+	ExtraHeaders map[string]string // Extra HTTP headers sent with every request
 }
 
 // --- Factory ---
 
 // NewLLMClient creates the appropriate client based on the resolved endpoint protocol.
-// protocol: "anthropic" -> AnthropicClient, anything else -> OpenAIClient.
+// protocol dispatch (canonical names from protocol.go):
+//   - ProtocolAnthropic ("anthropic") -> AnthropicClient
+//   - ProtocolOpenAIResponses ("openai-responses") -> OpenAIResponsesClient
+//   - ProtocolOpenAIChatCompletions ("openai") or anything else -> OpenAIClient
+//
+// The defensive default keeps legacy callers that somehow bypass resolver
+// normalization working (they previously got OpenAIClient for any non-anthropic
+// protocol).
 func NewLLMClient(ep ResolvedEndpoint) LLMClient {
 	cfg := ClientConfig{
-		URL:       ep.URL,
-		APIKey:    ep.Token,
-		Model:     ep.Model,
-		ExtraBody: ep.ExtraBody,
+		URL:          ep.URL,
+		APIKey:       ep.Token,
+		Model:        ep.Model,
+		AuthHeader:   ep.AuthHeader,
+		Timeout:      ep.Timeout,
+		ExtraBody:    ep.ExtraBody,
+		ExtraHeaders: ep.ExtraHeaders,
 	}
-	if ep.Protocol == "anthropic" {
+	switch ep.Protocol {
+	case ProtocolAnthropic:
 		return NewAnthropicClient(cfg)
+	case ProtocolOpenAIResponses:
+		return NewOpenAIResponsesClient(cfg)
+	default:
+		return NewOpenAIClient(cfg)
 	}
-	return NewOpenAIClient(cfg)
 }
 
 // --- Token counting with tiktoken ---
@@ -289,15 +310,20 @@ func NewOpenAIClient(cfg ClientConfig) *OpenAIClient {
 
 	sdkBaseURL := strings.TrimSuffix(strings.TrimRight(cfg.URL, "/"), "/chat/completions")
 
+	opts := []openaiopt.RequestOption{
+		openaiopt.WithAPIKey(cfg.APIKey),
+		openaiopt.WithBaseURL(sdkBaseURL),
+		openaiopt.WithMaxRetries(5),
+		openaiopt.WithHeader("User-Agent", userAgent("")),
+		openaiopt.WithRequestTimeout(cfg.Timeout),
+	}
+	for k, v := range cfg.ExtraHeaders {
+		opts = append(opts, openaiopt.WithHeader(k, v))
+	}
+
 	return &OpenAIClient{
 		cfg: cfg,
-		sdk: openai.NewClient(
-			openaiopt.WithAPIKey(cfg.APIKey),
-			openaiopt.WithBaseURL(sdkBaseURL),
-			openaiopt.WithMaxRetries(5),
-			openaiopt.WithHeader("User-Agent", userAgent("")),
-			openaiopt.WithRequestTimeout(cfg.Timeout),
-		),
+		sdk: openai.NewClient(opts...),
 	}
 }
 
@@ -308,6 +334,7 @@ type ChatRequest struct {
 	Tools       []ToolDef `json:"tools,omitempty"`
 	Temperature *float64  `json:"temperature,omitempty"`
 	MaxTokens   int       `json:"max_tokens,omitempty"`
+	SessionID   string    `json:"-"` // per-file agent loop session ID; used as prompt_cache_key by the Responses API client
 }
 
 // CompletionsWithCtx sends a chat completion request with context support for cancellation and timeout.
@@ -321,15 +348,116 @@ func (c *OpenAIClient) CompletionsWithCtx(ctx context.Context, req ChatRequest) 
 
 	var opts []openaiopt.RequestOption
 	for k, v := range c.cfg.ExtraBody {
+		// Skip the "stream" key here. The streaming decision below uses a
+		// dedicated boolean check, and when streaming is enabled the SDK's
+		// NewStreaming method sets stream=true on the wire itself. When
+		// streaming is NOT enabled, leaving the key in the body would make
+		// the API answer with text/event-stream and the non-streaming path
+		// fails to decode (see issue #647).
+		if k == "stream" {
+			continue
+		}
 		opts = append(opts, openaiopt.WithJSONSet(k, v))
+	}
+	if stream, ok := c.cfg.ExtraBody["stream"].(bool); ok && stream {
+		return c.completionsStreaming(ctx, params, opts...)
 	}
 
 	sdkResp, err := c.sdk.Chat.Completions.New(ctx, params, opts...)
+	if errors.Is(err, io.ErrUnexpectedEOF) {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, ctxErr
+		}
+		retryResp, retryErr := c.sdk.Chat.Completions.New(ctx, params, opts...)
+		if retryErr == nil {
+			sdkResp = retryResp
+			err = nil
+		} else {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return nil, ctxErr
+			}
+			if !errors.Is(retryErr, io.ErrUnexpectedEOF) {
+				err = retryErr
+			}
+		}
+	}
 	if err != nil {
 		return nil, err
 	}
 
 	return c.mapOpenAIResponse(sdkResp), nil
+}
+
+func (c *OpenAIClient) completionsStreaming(ctx context.Context, params openai.ChatCompletionNewParams, opts ...openaiopt.RequestOption) (*ChatResponse, error) {
+	stream := c.sdk.Chat.Completions.NewStreaming(ctx, params, opts...)
+	defer stream.Close()
+
+	accumulator := openai.ChatCompletionAccumulator{}
+	reasoningByChoice := make(map[int64]*strings.Builder)
+	seenChoices := make(map[int64]bool)
+	finishedChoices := make(map[int64]bool)
+	var choiceOrder []int64
+	var usage *UsageInfo
+	for stream.Next() {
+		chunk := stream.Current()
+		if chunk.JSON.Usage.Valid() {
+			if chunkUsage := resolveUsage([]byte(chunk.RawJSON())); chunkUsage != nil {
+				usage = chunkUsage
+			}
+		}
+		for _, choice := range chunk.Choices {
+			if !seenChoices[choice.Index] {
+				seenChoices[choice.Index] = true
+				choiceOrder = append(choiceOrder, choice.Index)
+			}
+			if choice.FinishReason != "" {
+				finishedChoices[choice.Index] = true
+			}
+
+			extra, ok := choice.Delta.JSON.ExtraFields["reasoning_content"]
+			if !ok {
+				continue
+			}
+
+			var reasoningContent string
+			if err := json.Unmarshal([]byte(extra.Raw()), &reasoningContent); err != nil {
+				reasoningContent = extra.Raw()
+			}
+			builder := reasoningByChoice[choice.Index]
+			if builder == nil {
+				builder = &strings.Builder{}
+				reasoningByChoice[choice.Index] = builder
+			}
+			builder.WriteString(reasoningContent)
+		}
+		if !accumulator.AddChunk(chunk) {
+			return nil, fmt.Errorf("OpenAI streaming response contained inconsistent chunks")
+		}
+	}
+	if err := stream.Err(); err != nil {
+		return nil, err
+	}
+	if len(choiceOrder) == 0 {
+		return nil, fmt.Errorf("OpenAI streaming response contained no choices")
+	}
+	for _, index := range choiceOrder {
+		if !finishedChoices[index] {
+			return nil, fmt.Errorf("OpenAI streaming response ended before choice %d finished", index)
+		}
+	}
+
+	resp := c.mapOpenAIResponse(&accumulator.ChatCompletion)
+	if usage != nil {
+		resp.Usage = usage
+	}
+	for i := range resp.Choices {
+		builder := reasoningByChoice[accumulator.Choices[i].Index]
+		if builder != nil {
+			resp.Choices[i].Message.ReasoningContent = builder.String()
+		}
+	}
+
+	return resp, nil
 }
 
 // buildOpenAIParams converts the shared ChatRequest into OpenAI SDK parameters.
@@ -482,16 +610,39 @@ func NewAnthropicClient(cfg ClientConfig) *AnthropicClient {
 	}
 
 	sdkBaseURL := strings.TrimSuffix(strings.TrimRight(cfg.URL, "/"), "/v1/messages")
+	authHeader, _ := NormalizeAuthHeader(cfg.AuthHeader)
+	if authHeader == "" {
+		authHeader = "authorization"
+	}
+	cfg.AuthHeader = authHeader
+
+	opts := []option.RequestOption{
+		option.WithBaseURL(sdkBaseURL),
+		option.WithMaxRetries(5),
+		option.WithHeader("User-Agent", userAgent("claude")),
+		option.WithRequestTimeout(cfg.Timeout),
+	}
+
+	switch authHeader {
+	case "authorization":
+		opts = append(opts, option.WithHeaderDel("X-Api-Key"), option.WithAuthToken(cfg.APIKey))
+	case "x-api-key":
+		opts = append(opts, option.WithHeaderDel("Authorization"), option.WithAPIKey(cfg.APIKey))
+	default:
+		opts = append(opts,
+			option.WithHeaderDel("Authorization"),
+			option.WithHeaderDel("X-Api-Key"),
+			option.WithHeader(authHeader, cfg.APIKey),
+		)
+	}
+
+	for k, v := range cfg.ExtraHeaders {
+		opts = append(opts, option.WithHeader(k, v))
+	}
 
 	return &AnthropicClient{
 		cfg: cfg,
-		sdk: anthropic.NewClient(
-			option.WithAuthToken(cfg.APIKey),
-			option.WithBaseURL(sdkBaseURL),
-			option.WithMaxRetries(5),
-			option.WithHeader("User-Agent", userAgent("claude")),
-			option.WithRequestTimeout(cfg.Timeout),
-		),
+		sdk: anthropic.NewClient(opts...),
 	}
 }
 
@@ -502,10 +653,20 @@ func (c *AnthropicClient) CompletionsWithCtx(ctx context.Context, req ChatReques
 		model = c.cfg.Model
 	}
 
-	params := c.buildAnthropicParams(model, req)
+	params, err := c.buildAnthropicParams(model, req)
+	if err != nil {
+		return nil, err
+	}
 
 	var opts []option.RequestOption
 	for k, v := range c.cfg.ExtraBody {
+		// This client is non-streaming: it calls Messages.New, which expects a
+		// single JSON body. If a provider config sets extra_body.stream=true,
+		// forwarding it here makes the API answer with SSE and every call fails
+		// to decode. Drop the key rather than forward it.
+		if k == "stream" {
+			continue
+		}
 		opts = append(opts, option.WithJSONSet(k, v))
 	}
 
@@ -518,7 +679,7 @@ func (c *AnthropicClient) CompletionsWithCtx(ctx context.Context, req ChatReques
 }
 
 // buildAnthropicParams converts the shared ChatRequest into Anthropic SDK parameters.
-func (c *AnthropicClient) buildAnthropicParams(model string, req ChatRequest) anthropic.MessageNewParams {
+func (c *AnthropicClient) buildAnthropicParams(model string, req ChatRequest) (anthropic.MessageNewParams, error) {
 	var systemBlocks []anthropic.TextBlockParam
 	var messages []anthropic.MessageParam
 	var pendingToolResults []Message
@@ -557,7 +718,14 @@ func (c *AnthropicClient) buildAnthropicParams(model string, req ChatRequest) an
 			for _, tc := range msg.ToolCalls {
 				argsMap := map[string]any{}
 				if tc.Function.Arguments != "" {
-					json.Unmarshal([]byte(tc.Function.Arguments), &argsMap)
+					if err := json.Unmarshal([]byte(tc.Function.Arguments), &argsMap); err != nil {
+						return anthropic.MessageNewParams{}, fmt.Errorf("invalid tool call arguments for %s: %w", tc.Function.Name, err)
+					}
+					if argsMap == nil {
+						// null arguments → empty map; Anthropic API rejects
+						// null input (#382). Same guard as llmloop.parseToolArgs.
+						argsMap = map[string]any{}
+					}
 				}
 				blocks = append(blocks, anthropic.NewToolUseBlock(tc.ID, argsMap, tc.Function.Name))
 			}
@@ -623,7 +791,7 @@ func (c *AnthropicClient) buildAnthropicParams(model string, req ChatRequest) an
 		params.Temperature = anthropic.Float(*req.Temperature)
 	}
 
-	return params
+	return params, nil
 }
 
 func buildToolInputSchema(params map[string]any) anthropic.ToolInputSchemaParam {

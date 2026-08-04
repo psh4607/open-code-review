@@ -6,20 +6,20 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
 
-	"github.com/open-code-review/open-code-review/internal/gitcmd"
-	"github.com/open-code-review/open-code-review/internal/model"
+	"github.com/alibaba/open-code-review/internal/gitcmd"
+	"github.com/alibaba/open-code-review/internal/model"
 )
 
 var (
 	diffHeaderRe = regexp.MustCompile(`^diff --git a/(.+?) b/(.+)$`)
-	oldFileRe    = regexp.MustCompile(`^--- a/(.+)$`)
-	newFileRe    = regexp.MustCompile(`^\+\+\+ b/(.+)$`)
-	binaryRe     = regexp.MustCompile(`Binary files `)
+	// Anchored: git emits the marker at column 0 ("Binary files a/x and b/y
+	// differ"). Content lines inside hunks always carry a leading "+", "-"
+	// or " " prefix, so an anchored match can never misfire on file content.
+	binaryRe = regexp.MustCompile(`^Binary files `)
 )
 
 // ParseDiffText splits the unified diff text into per-file Diff structs.
@@ -32,6 +32,13 @@ func ParseDiffText(ctx context.Context, diffText string, repoDir string, ref str
 	var diffs []model.Diff
 	var current *model.Diff
 	var buf strings.Builder
+	// inHunk tracks whether the current line sits inside a "@@" hunk of the
+	// current file's section. Only hunk content lines carry a leading
+	// "+"/"-"/" " marker, so insertion/deletion counting and the binary
+	// marker must look at hunk state: outside a hunk, "+++ b/file" and
+	// "--- a/file" are headers, not content; inside a hunk, an added line
+	// like "++i" renders as "+++i" and still counts as an insertion.
+	inHunk := false
 
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
@@ -49,25 +56,46 @@ func ParseDiffText(ctx context.Context, diffText string, repoDir string, ref str
 				OldPath: m[1],
 				NewPath: m[2],
 			}
+			inHunk = false
 		}
 		if current == nil {
 			continue
 		}
 
 		switch {
-		case binaryRe.MatchString(line):
+		case strings.HasPrefix(line, "@@"):
+			inHunk = true
+		// The object IDs and mode in Git's extended "index" header are not
+		// useful review context. Keep index text in hunks, where it is file
+		// content and therefore carries a diff prefix.
+		case !inHunk && strings.HasPrefix(line, "index "):
+			continue
+		case !inHunk && binaryRe.MatchString(line):
 			current.IsBinary = true
-		case oldFileRe.MatchString(line):
-			if p := oldFileRe.FindStringSubmatch(line); len(p) > 1 && p[1] == "/dev/null" {
-				current.IsNew = true
-			}
-		case newFileRe.MatchString(line):
-			if p := newFileRe.FindStringSubmatch(line); len(p) > 1 && p[1] == "/dev/null" {
-				current.IsDeleted = true
-			}
-		case strings.HasPrefix(line, "+") && !strings.HasPrefix(line, "+++"):
+		// Extended header lines (unambiguous: content lines always carry a
+		// leading "+", "-" or " " prefix, so a bare prefix match is safe).
+		case strings.HasPrefix(line, "new file mode "):
+			current.IsNew = true
+		case strings.HasPrefix(line, "deleted file mode "):
+			current.IsDeleted = true
+		case strings.HasPrefix(line, "rename from "):
+			// Authoritative old path for renames; more reliable than the
+			// "diff --git" header when paths contain spaces.
+			current.OldPath = strings.TrimPrefix(line, "rename from ")
+			current.IsRenamed = true
+		case strings.HasPrefix(line, "rename to "):
+			current.NewPath = strings.TrimPrefix(line, "rename to ")
+			current.IsRenamed = true
+		// git emits "--- /dev/null" / "+++ /dev/null" without a/ b/ prefixes.
+		// Guarded by inHunk: inside a hunk the same strings can be content
+		// (e.g. an added line "++ /dev/null").
+		case !inHunk && line == "--- /dev/null":
+			current.IsNew = true
+		case !inHunk && line == "+++ /dev/null":
+			current.IsDeleted = true
+		case inHunk && strings.HasPrefix(line, "+"):
 			current.Insertions++
-		case strings.HasPrefix(line, "-") && !strings.HasPrefix(line, "---"):
+		case inHunk && strings.HasPrefix(line, "-"):
 			current.Deletions++
 		}
 		buf.WriteString(line)
@@ -92,7 +120,7 @@ func finalizeDiff(ctx context.Context, d *model.Diff, repoDir string, ref string
 		return
 	}
 	if ref != "" {
-		args := []string{"-c", "core.quotepath=false", "show", ref + ":" + d.NewPath}
+		args := []string{"-c", "core.quotepath=false", "show", "--end-of-options", ref + ":" + d.NewPath}
 		var output []byte
 		var err error
 		if runner != nil {
@@ -110,8 +138,7 @@ func finalizeDiff(ctx context.Context, d *model.Diff, repoDir string, ref string
 		d.NewFileContent = string(output)
 		return
 	}
-	fullPath := filepath.Join(repoDir, d.NewPath)
-	content, err := os.ReadFile(fullPath)
+	content, err := readWorkspaceFileForDiff(repoDir, d.NewPath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[ocr] WARNING: cannot read file %s for review: %v\n", d.NewPath, err)
 		return

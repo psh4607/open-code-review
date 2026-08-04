@@ -2,47 +2,46 @@ package agent
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
-	"os/exec"
-	"regexp"
+	"runtime/debug"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
-	"github.com/open-code-review/open-code-review/internal/config/rules"
-	"github.com/open-code-review/open-code-review/internal/config/template"
-	"github.com/open-code-review/open-code-review/internal/config/toolsconfig"
-	"github.com/open-code-review/open-code-review/internal/diff"
-	"github.com/open-code-review/open-code-review/internal/gitcmd"
-	"github.com/open-code-review/open-code-review/internal/llm"
-	"github.com/open-code-review/open-code-review/internal/model"
-	"github.com/open-code-review/open-code-review/internal/session"
-	"github.com/open-code-review/open-code-review/internal/stdout"
-	"github.com/open-code-review/open-code-review/internal/telemetry"
-	"github.com/open-code-review/open-code-review/internal/tool"
+	"github.com/alibaba/open-code-review/internal/config/rules"
+	"github.com/alibaba/open-code-review/internal/config/template"
+	"github.com/alibaba/open-code-review/internal/config/toolsconfig"
+	"github.com/alibaba/open-code-review/internal/diff"
+	"github.com/alibaba/open-code-review/internal/gitcmd"
+	"github.com/alibaba/open-code-review/internal/llm"
+	"github.com/alibaba/open-code-review/internal/llmloop"
+	"github.com/alibaba/open-code-review/internal/model"
+	"github.com/alibaba/open-code-review/internal/session"
+	"github.com/alibaba/open-code-review/internal/stdout"
+	"github.com/alibaba/open-code-review/internal/telemetry"
+	"github.com/alibaba/open-code-review/internal/tool"
+
+	"go.opentelemetry.io/otel/codes"
 )
 
-// planBlockPattern matches the optional "Review Plan" section in a MAIN_TASK
-// template user message: a header line beginning with "### " whose text
-// contains "Review Plan" or "审查计划" (with optional ASCII "(Optional)" /
-// Chinese "（可选）" suffix), the {{plan_guidance}} placeholder on its own
-// line, and one trailing blank line. The ASCII and Chinese header forms
-// are matched separately because Go's regexp engine does not define \b
-// around CJK ideographs.
-var planBlockPattern = regexp.MustCompile(
-	`(?m)^### [^\n]*(?:Review Plan|审查计划)[^\n]*\n\{\{plan_guidance\}\}\n\n?`)
+// AgentWarning is re-exported from llmloop for backwards compatibility with
+// existing callers (cmd/opencodereview/output.go).
+type AgentWarning = llmloop.AgentWarning
 
-// stripEmptyPlanBlock removes the "### Review Plan …\n{{plan_guidance}}\n\n"
-// wrapper from a MAIN_TASK user message when the plan phase produced no
-// guidance. The previous implementation hard-coded a single Chinese literal,
-// which did not match the actual English template shipped in
-// task_template.json, so the literal token "{{plan_guidance}}" leaked into
-// the rendered prompt on every review where the plan phase was skipped or
-// failed. Strip is a no-op when the wrapper is absent.
-func stripEmptyPlanBlock(content string) string {
-	return planBlockPattern.ReplaceAllString(content, "")
+// CommentWorkerPool is re-exported from llmloop for backwards compatibility.
+type CommentWorkerPool = llmloop.CommentWorkerPool
+
+// NewCommentWorkerPool delegates to llmloop.NewCommentWorkerPool.
+func NewCommentWorkerPool(workerCount int) *CommentWorkerPool {
+	return llmloop.NewCommentWorkerPool(workerCount)
 }
 
 // Args holds all dependencies and configuration needed to run a review session.
@@ -59,6 +58,7 @@ type Args struct {
 
 	// ReviewMode is one of "workspace", "range", or "commit".
 	// When empty, it is derived from From/To/Commit at session creation time.
+	// Full-scan reviews are owned by internal/scan and never reach this Args.
 	ReviewMode string
 
 	// Template loaded from YAML config file.
@@ -78,7 +78,7 @@ type Args struct {
 	Tools *tool.Registry
 
 	// PlanToolDefs holds llm.ToolDef entries enabled in plan_task, built once at startup.
-	// When nil, plan phase sends no tool definitions (same as Java behavior when plan_task is false).
+	// When nil, plan phase sends no tool definitions.
 	PlanToolDefs []llm.ToolDef
 
 	// MainToolDefs holds llm.ToolDef entries enabled in main_task, built once at startup.
@@ -86,16 +86,15 @@ type Args struct {
 
 	// CommentWorkerPool — separate goroutine pool for running asynchronous
 	// comment post-processing tasks (tracking, re-tracking, reflection,
-	// suggestion validation). This mirrors the Java side's subtaskExecutor
-	// which executes the CODE_COMMENT tool off the critical path so that the
-	// main LLM tool-use loop can continue issuing requests while comments are
-	// being processed in the background.
+	// suggestion validation). It executes the CODE_COMMENT tool off the
+	// critical path so that the main LLM tool-use loop can continue issuing
+	// requests while comments are being processed in the background.
 	//
 	// When nil (the default), comment processing happens synchronously inside
 	// executeToolCall instead of via a separate worker pool.
 	CommentWorkerPool *CommentWorkerPool
 
-	// Concurrency limit for per-file subtasks. Defaults to number of CPUs.
+	// Concurrency limit for per-file subtasks. MaxConcurrency <= 0 defaults to 8.
 	MaxConcurrency int
 
 	// Concurrent task timeout in minutes. 0 means no timeout.
@@ -112,6 +111,12 @@ type Args struct {
 	// template phases (plan/memory_compression) don't specify one.
 	Model string
 
+	// Provider is the configured provider name (e.g. "openai", "anthropic", or a
+	// custom-provider key) recorded in the manifest's execution.provider. It is a
+	// non-secret label; empty when the endpoint was resolved from environment
+	// variables with no named provider.
+	Provider string
+
 	// GitRunner limits the total number of concurrent git subprocesses.
 	// When nil, subprocesses are spawned without a global limit.
 	GitRunner *gitcmd.Runner
@@ -119,112 +124,61 @@ type Args struct {
 	// Session is an optional session history instance for collecting conversation records.
 	// When nil, a default one is created automatically with git branch auto-detected from repoDir.
 	Session *session.SessionHistory
+
+	// Resume is an optional read-only checkpoint index from a previous review session.
+	Resume *session.ResumeState
+
+	// MaxTokensBudget caps the aggregate token usage (input+output) across the
+	// whole run; dispatch stops once the running total + a per-file look-ahead
+	// would exceed it. 0 = unlimited. Mirrors scan.Args.MaxTokensBudget.
+	MaxTokensBudget int64
+
+	// RuntimeConfig carries the non-secret, allowlisted runtime settings that
+	// identify how this run was configured, for the manifest's
+	// runtime_config_sha256. It is populated by the cmd layer from the resolved
+	// LLM endpoint and app config; a zero value simply omits those fields from
+	// the hash input.
+	RuntimeConfig RuntimeConfig
 }
 
-// AgentWarning describes a non-fatal warning recorded during review.
-type AgentWarning struct {
-	File    string `json:"file"`
-	Message string `json:"message"`
-	Type    string `json:"type"`
+// RuntimeConfig captures the allowlisted, non-secret runtime settings that
+// identify how a run was configured, for the manifest's runtime_config_sha256.
+// It deliberately excludes every secret: no token, and only the endpoint host
+// (scheme, embedded credentials, path and query stripped) — never the full URL.
+// Model and concurrency are not duplicated here; the hash folds them in from
+// Args.Model and Args.MaxConcurrency.
+type RuntimeConfig struct {
+	Protocol     string        // LLM wire protocol (canonical name, e.g. "anthropic")
+	EndpointHost string        // endpoint host[:port] only, credential- and path-free
+	Language     string        // configured review output language
+	Timeout      time.Duration // per-request timeout (0 means client default)
 }
 
-// compression thresholds as fractions of MaxTokens.
-const (
-	tokenSoftThreshold    = 0.60 // async background compression
-	tokenWarningThreshold = 0.80 // immediate sync compression
-)
-
-// round groups consecutive messages starting with an assistant message
-// followed by zero or more tool result messages.
-type round struct {
-	assistantIdx int
-	toolIdxs     []int
-}
-
-// partitionResult describes how messages should be split for compression.
-type partitionResult struct {
-	frozenEnd   int
-	compressEnd int
-	rounds      []round
-	activeCount int
-}
-
-// compressionJob tracks an in-flight background compression operation.
-type compressionJob struct {
-	done    chan struct{}
-	rebuilt []llm.Message
-	cancel  context.CancelFunc
-}
-
-// Agent orchestrates the AI-powered code review.
+// Agent orchestrates the AI-powered code review. LLM tool-use loop / memory
+// compression / token aggregation now live in internal/llmloop.Runner; this
+// struct holds the diff-side state and orchestrates per-file subtasks.
 type Agent struct {
-	args                  Args
-	diffs                 []model.Diff // parsed diffs
-	totalInsertions       int64
-	totalDeletions        int64
-	currentDate           string
-	session               *session.SessionHistory
-	totalInputTokens      int64 // accumulated input/prompt tokens, accessed atomically
-	totalOutputTokens     int64 // accumulated completion tokens, accessed atomically
-	totalCacheReadTokens  int64 // accumulated cache read tokens, accessed atomically
-	totalCacheWriteTokens int64 // accumulated cache write tokens, accessed atomically
-	subtaskFailed         int64 // count of failed subtasks, accessed atomically
-	warningsMu            sync.Mutex
-	warnings              []AgentWarning
-	compressionMu         sync.Mutex
-	pendingJob            *compressionJob
+	args            Args
+	diffs           []model.Diff // parsed diffs
+	totalInsertions int64
+	totalDeletions  int64
+	currentDate     string
+	session         *session.SessionHistory
+	subtaskFailed   int64 // count of failed subtasks, accessed atomically
+	runner          *llmloop.Runner
+	resumeInfo      *ResumeInfo
+	budgetExceeded  bool // set when a token/tool-call budget gate stopped dispatch
+
+	// inputResolution holds this run's frozen commit endpoints (resolved_base/
+	// head/exact_range), and repoRemoteIdentity the credential-free repository
+	// identity. Both are captured from git during loadDiffs (which has a context)
+	// and consumed by finalizeManifest to fill the manifest input/repository.
+	inputResolution    diff.InputResolution
+	repoRemoteIdentity string
 }
 
-// CommentWorkerPool manages a fixed-size pool of workers dedicated to
-// processing code-review comment post-steps (line-range tracking,
-// re-tracking, reflection, suggestion validation) asynchronously.
-//
-// These steps can be time-consuming (network calls to LLM, external APIs,
-// heavy computation). By offloading them to a worker pool the main LLM
-// tool-use loop stays unblocked, reducing overall latency - just like the
-// Java implementation uses a dedicated subtaskExecutor for the CODE_COMMENT
-// tool (see CodeReviewNativeAgent.executeToolCall ~L640-642).
-type CommentWorkerPool struct {
-	semaphore chan struct{}
-	wg        sync.WaitGroup
-	resultsMu sync.Mutex
-	results   []model.LlmComment
-}
-
-// NewCommentWorkerPool creates a pool with the given concurrency limit.
-func NewCommentWorkerPool(workerCount int) *CommentWorkerPool {
-	if workerCount <= 0 {
-		workerCount = 8
-	}
-	return &CommentWorkerPool{
-		semaphore: make(chan struct{}, workerCount),
-	}
-}
-
-// Submit runs f in a background goroutine bounded by the semaphore.
-// When f completes its return value is collected internally.
-func (p *CommentWorkerPool) Submit(f func() ([]model.LlmComment, error)) {
-	p.wg.Add(1)
-	go func() {
-		defer p.wg.Done()
-		p.semaphore <- struct{}{}        // acquire
-		defer func() { <-p.semaphore }() // release
-
-		comments, err := f()
-		if err != nil {
-			fmt.Fprintf(stdout.Writer(), "[ocr] CommentWorkerPool error: %v\n", err)
-		}
-		p.resultsMu.Lock()
-		p.results = append(p.results, comments...)
-		p.resultsMu.Unlock()
-	}()
-}
-
-// Await blocks until all submitted work has completed and returns aggregated results.
-func (p *CommentWorkerPool) Await() []model.LlmComment {
-	p.wg.Wait()
-	return p.results
-}
+// ResumeInfo summarizes file-level reuse for a resumed review.
+type ResumeInfo = session.ResumeInfo
 
 // New creates a new Agent from the given arguments.
 func New(args Args) *Agent {
@@ -235,22 +189,40 @@ func New(args Args) *Agent {
 		args.CommentCollector = tool.NewCommentCollector()
 	}
 	if args.Session == nil {
-		gitBranch := detectGitBranch(args.RepoDir)
+		gitBranch := detectGitBranch(context.Background(), args.RepoDir)
 		mode := args.ReviewMode
 		if mode == "" {
 			mode = reviewModeString(args.From, args.To, args.Commit)
 		}
 		args.Session = session.New(args.RepoDir, gitBranch, args.Model, session.SessionOptions{
-			ReviewMode: mode,
-			DiffFrom:   args.From,
-			DiffTo:     args.To,
-			DiffCommit: args.Commit,
+			ReviewMode:  mode,
+			DiffFrom:    args.From,
+			DiffTo:      args.To,
+			DiffCommit:  args.Commit,
+			ResumedFrom: resumedFromSession(args.Resume),
+			Operation:   session.OperationReview,
 		})
 	}
-	return &Agent{
+	a := &Agent{
 		args:    args,
 		session: args.Session,
 	}
+	a.initManifest()
+	// DiffLookup closure captures a so the runner can resolve per-file
+	// model.Diff records lazily (a.diffs is only populated by loadDiffs,
+	// after New returns).
+	a.runner = llmloop.NewRunner(llmloop.Deps{
+		LLMClient:         args.LLMClient,
+		Model:             args.Model,
+		Template:          args.Template,
+		Tools:             args.Tools,
+		MainToolDefs:      args.MainToolDefs,
+		CommentCollector:  args.CommentCollector,
+		CommentWorkerPool: args.CommentWorkerPool,
+		Session:           args.Session,
+		DiffLookup:        a.findDiff,
+	})
+	return a
 }
 
 // Run executes the full review pipeline: parse diffs -> plan per file -> LLM tool-loop -> collect comments.
@@ -259,7 +231,25 @@ func (a *Agent) Run(ctx context.Context) ([]model.LlmComment, error) {
 	ctx, diffSpan := telemetry.StartSpan(ctx, "diff.parse")
 	if err := a.loadDiffs(ctx); err != nil {
 		diffSpan.End()
-		return nil, fmt.Errorf("load diffs: %w", err)
+		// The builder already exists (agent.New created session + manifest), but
+		// no item was selected yet. Record the run-level input failure at this
+		// trigger point, then finalize and persist so the run still emits a
+		// session_end with a failed manifest instead of looking aborted.
+		if b := a.session.Manifest(); b != nil {
+			_ = b.SetRunFailure(session.RunFailureInput, "failed to resolve review input")
+		}
+		manifestErr := a.finalizeManifest()
+		// Keep the load failure as the primary cause, but never drop a persistence
+		// failure: a run that could not even write its failed session_end must
+		// report both rather than silently prefer one.
+		loadErr := fmt.Errorf("load diffs: %w", err)
+		if ferr := a.session.Finalize(); ferr != nil {
+			manifestErr = errors.Join(manifestErr, fmt.Errorf("finalize session: %w", ferr))
+		}
+		if manifestErr != nil {
+			return nil, errors.Join(loadErr, manifestErr)
+		}
+		return nil, loadErr
 	}
 	telemetry.SetAttr(diffSpan, "files.changed", len(a.diffs))
 	telemetry.SetAttr(diffSpan, "lines.inserted", int64(a.totalInsertions))
@@ -280,7 +270,17 @@ func (a *Agent) Run(ctx context.Context) ([]model.LlmComment, error) {
 	if len(a.diffs) == 0 {
 		fmt.Fprintln(stdout.Writer(), "[ocr] No supported files changed. Skipping review.")
 		telemetry.Event(ctx, "no.files.changed")
-		a.session.Finalize()
+		// No item was ever selected: finalize yields a skipped manifest (no
+		// run_failure), which is the correct terminal state for "nothing to do".
+		// A persistence failure here is still a delivery error — a clean skip
+		// cannot be claimed if its session_end never reached disk.
+		manifestErr := a.finalizeManifest()
+		if ferr := a.session.Finalize(); ferr != nil {
+			manifestErr = errors.Join(manifestErr, fmt.Errorf("finalize session: %w", ferr))
+		}
+		if manifestErr != nil {
+			return []model.LlmComment{}, manifestErr
+		}
 		return []model.LlmComment{}, nil
 	}
 
@@ -293,12 +293,46 @@ func (a *Agent) Run(ctx context.Context) ([]model.LlmComment, error) {
 	// Record file count metric.
 	telemetry.RecordFilesReviewed(ctx, int64(reviewCount))
 
+	// Pre-run cost projection so users aren't surprised by a large review.
+	// Non-blocking warn-only: the estimate is order-of-magnitude and cannot
+	// account for agent tool-use inflation, so it is a floor; real usage is
+	// reported from the API after the run.
+	//
+	// Gated behind MaxTokensBudget so users who never opt into a budget see no
+	// new output line (the estimate is only useful to budget-setters comparing
+	// projected cost against their cap). Keeps the prior text-mode output
+	// unchanged for the common unlimited path.
+	if a.args.MaxTokensBudget > 0 {
+		est := estimateDiffCost(a.diffs)
+		fmt.Fprintf(stdout.Writer(), "[ocr] estimated cost: %s\n", est)
+		fmt.Fprintf(stdout.Writer(), "[ocr] token budget: %s (dispatch stops once exceeded)\n", humanTokens(a.args.MaxTokensBudget))
+		if est.TotalTokens > a.args.MaxTokensBudget {
+			fmt.Fprintf(stdout.Writer(), "[ocr] WARNING: estimate (%s) exceeds token budget (%s); review will stop partway\n",
+				humanTokens(est.TotalTokens), humanTokens(a.args.MaxTokensBudget))
+		}
+	}
+
 	// Step 2: Dispatch per-file subtasks concurrently
 	comments, err := a.dispatchSubtasks(ctx)
 	if len(comments) > 0 {
 		telemetry.RecordCommentsGenerated(ctx, int64(len(comments)))
 	}
-	a.session.Finalize()
+	// Freeze coverage into the immutable manifest before session_end embeds it,
+	// so the CLI and the persisted session serialize the identical object. A
+	// persistence failure is a delivery error in its own right: when the review
+	// also failed, both facts are reported (errors.Join) rather than letting the
+	// review error hide the fact that session_end never reached disk.
+	if manifestErr := a.finalizeManifest(); manifestErr != nil {
+		err = errors.Join(err, manifestErr)
+	}
+	if ferr := a.session.Finalize(); ferr != nil {
+		finalizeErr := fmt.Errorf("finalize session: %w", ferr)
+		if err != nil {
+			err = errors.Join(err, finalizeErr)
+		} else {
+			err = finalizeErr
+		}
+	}
 	return comments, err
 }
 
@@ -307,9 +341,38 @@ func (a *Agent) Session() *session.SessionHistory {
 	return a.session
 }
 
-// FilesReviewed returns the number of changed files included in this review.
+// SessionID returns the current review's resumable session ID. It returns an
+// empty string when the session file could not be created, so callers do not
+// advertise a retry target that does not exist.
+func (a *Agent) SessionID() string {
+	if a == nil || a.session == nil || !a.session.HasPersistence() {
+		return ""
+	}
+	return a.session.SessionID
+}
+
+// RunManifest returns the immutable coverage snapshot produced for this review,
+// or nil when manifest construction failed. The scan path deliberately returns
+// nil because scan is outside the v1 manifest scope.
+func (a *Agent) RunManifest() *session.RunManifest {
+	if a == nil || a.session == nil {
+		return nil
+	}
+	return a.session.FinalManifest()
+}
+
+// ResumeInfo returns resume metadata for output. Nil means this was not a resume run.
+func (a *Agent) ResumeInfo() *ResumeInfo {
+	if a.resumeInfo == nil {
+		return nil
+	}
+	info := *a.resumeInfo
+	return &info
+}
+
+// FilesReviewed returns the number of dispatchable files included in this review.
 func (a *Agent) FilesReviewed() int64 {
-	return int64(len(a.diffs))
+	return countDispatchable(a.diffs)
 }
 
 // Diffs returns the parsed diffs loaded by the agent.
@@ -319,48 +382,47 @@ func (a *Agent) Diffs() []model.Diff {
 
 // TotalTokensUsed returns PromptTokens + CompletionTokens across all LLM calls.
 // For Anthropic, PromptTokens already includes cache read/write tokens.
-func (a *Agent) TotalTokensUsed() int64 {
-	return atomic.LoadInt64(&a.totalInputTokens) + atomic.LoadInt64(&a.totalOutputTokens)
-}
+func (a *Agent) TotalTokensUsed() int64 { return a.runner.TotalTokensUsed() }
 
 // TotalInputTokens returns the accumulated input/prompt tokens from all LLM calls.
-func (a *Agent) TotalInputTokens() int64 {
-	return atomic.LoadInt64(&a.totalInputTokens)
-}
+func (a *Agent) TotalInputTokens() int64 { return a.runner.TotalInputTokens() }
 
 // TotalOutputTokens returns the accumulated completion tokens from all LLM calls.
-func (a *Agent) TotalOutputTokens() int64 {
-	return atomic.LoadInt64(&a.totalOutputTokens)
-}
+func (a *Agent) TotalOutputTokens() int64 { return a.runner.TotalOutputTokens() }
 
 // TotalCacheReadTokens returns the accumulated cache read tokens from all LLM calls.
-func (a *Agent) TotalCacheReadTokens() int64 {
-	return atomic.LoadInt64(&a.totalCacheReadTokens)
-}
+func (a *Agent) TotalCacheReadTokens() int64 { return a.runner.TotalCacheReadTokens() }
 
 // TotalCacheWriteTokens returns the accumulated cache write tokens from all LLM calls.
-func (a *Agent) TotalCacheWriteTokens() int64 {
-	return atomic.LoadInt64(&a.totalCacheWriteTokens)
-}
+func (a *Agent) TotalCacheWriteTokens() int64 { return a.runner.TotalCacheWriteTokens() }
+
+// ProjectSummary returns the markdown project-level summary. Always empty
+// for the diff-review path; defined so *Agent satisfies the
+// cmd/opencodereview.ResultProvider interface that scan.Agent also implements.
+func (a *Agent) ProjectSummary() string { return "" }
 
 // Warnings returns a copy of non-fatal warnings recorded during review.
-func (a *Agent) Warnings() []AgentWarning {
-	a.warningsMu.Lock()
-	defer a.warningsMu.Unlock()
-	out := make([]AgentWarning, len(a.warnings))
-	copy(out, a.warnings)
-	return out
-}
+func (a *Agent) Warnings() []AgentWarning { return a.runner.Warnings() }
+
+// ToolCalls returns per-tool call counts accumulated during review.
+func (a *Agent) ToolCalls() map[string]int64 { return a.runner.ToolCalls() }
+
+// BudgetExceeded reports whether the aggregate token budget gate stopped
+// dispatch before all files were reviewed. The run still returns the partial
+// comments collected up to that point (and a nil error), so those results are
+// published before the exit status is decided.
+//
+// This is a diagnostic signal, not a terminal state. The stop records a pending
+// failure cause (not a run_failure), so the manifest attributes the undispatched
+// items to failed(budget) and its coverage alone determines the terminal state
+// and exit code: partial/0 whenever anything was covered, failed/non-zero only
+// when the cap left nothing covered. Per-file token/tool-round exhaustion
+// does NOT set this flag — it is an item-level failed(budget) outcome instead.
+func (a *Agent) BudgetExceeded() bool { return a.budgetExceeded }
 
 // recordWarning adds a non-fatal warning to the agent's warning list.
 func (a *Agent) recordWarning(warningType, file, message string) {
-	a.warningsMu.Lock()
-	a.warnings = append(a.warnings, AgentWarning{
-		File:    file,
-		Message: message,
-		Type:    warningType,
-	})
-	a.warningsMu.Unlock()
+	a.runner.RecordWarning(warningType, file, message)
 }
 
 // loadDiffs populates the diff-related fields.
@@ -382,6 +444,13 @@ func (a *Agent) loadDiffs(ctx context.Context) error {
 	}
 
 	a.diffs = parsed
+
+	// Freeze this run's real commit endpoints and repository identity while the
+	// git-backed provider and a live context are in hand; finalizeManifest reads
+	// these (never re-resolving) so the manifest records the input as it was at
+	// dispatch time, even on a later skipped or failed path.
+	a.inputResolution = provider.ResolveInput(ctx)
+	a.repoRemoteIdentity = provider.RemoteIdentity(ctx)
 
 	for i := range parsed {
 		d := &parsed[i]
@@ -411,16 +480,6 @@ func (a *Agent) injectDiffMap() {
 	}
 }
 
-// lookupTool returns the provider for a given tool from the registry,
-// or nil if the tool is not registered.
-func lookupTool(reg *tool.Registry, t tool.Tool) tool.Provider {
-	p, ok := reg.Get(t.Name())
-	if !ok {
-		return nil
-	}
-	return p
-}
-
 // dispatchSubtasks runs the Plan + Main phases for each changed file concurrently.
 func (a *Agent) dispatchSubtasks(ctx context.Context) ([]model.LlmComment, error) {
 	startTime := time.Now()
@@ -431,8 +490,27 @@ func (a *Agent) dispatchSubtasks(ctx context.Context) ([]model.LlmComment, error
 	// Pre-filter: discard diffs whose diff content alone exceeds 80% of the token threshold.
 	a.diffs = a.filterLargeDiffs(a.diffs)
 	if len(a.diffs) == 0 {
-		return nil, fmt.Errorf("all diffs filtered out by token size")
+		// Everything oversized: nothing is selected, so this is a skipped run
+		// (empty coverage → terminal_state=skipped), not a hard error.
+		fmt.Fprintln(stdout.Writer(), "[ocr] All changed files exceeded the token size limit. Skipping review.")
+		return nil, nil
 	}
+
+	// Pre-dispatch pass: freeze the coverage denominator before any reuse or
+	// concurrent dispatch. Register every non-deleted planned item (reused and
+	// to-run alike) into the selected set, then seal it. Must run before
+	// applyResume so reused items are part of the same frozen denominator.
+	if err := a.registerCoverage(a.diffs); err != nil {
+		// Registration/seal only fails on an internal invariant violation. The
+		// coverage denominator is then untrustworthy, so mark the run failed
+		// internally but continue: findings are still produced and persisted.
+		a.recordWarning("manifest_error", "", err.Error())
+		if b := a.session.Manifest(); b != nil {
+			_ = b.SetRunFailure(session.RunFailureInternal, "coverage registration failed")
+		}
+	}
+
+	toDispatch := a.applyResume(a.diffs)
 
 	var wg sync.WaitGroup
 
@@ -445,17 +523,83 @@ func (a *Agent) dispatchSubtasks(ctx context.Context) ([]model.LlmComment, error
 	timeout := time.Duration(a.args.ConcurrentTaskTimeout) * time.Minute
 
 	var dispatched int64
-	for i := range a.diffs {
-		if a.diffs[i].IsDeleted {
+	for i := range toDispatch {
+		if toDispatch[i].IsDeleted {
 			continue
 		}
+
+		// Per-file budget look-ahead, checked BEFORE acquiring the semaphore
+		// (mirrors scan/agent.go:472-486): if the tokens already spent PLUS a
+		// look-ahead estimate of this file's cost would exceed the budget,
+		// stop scheduling further files. Any worker already in flight is
+		// allowed to finish — its tokens flow into the atomic counter; we do
+		// NOT cancel it (matches scan, avoids half-written session records).
+		// Overrun is therefore bounded by the in-flight worker count
+		// (≤ concurrency, default 8), never a whole batch.
+		if a.args.MaxTokensBudget > 0 {
+			used := a.runner.TotalTokensUsed()
+			nextEst := estimateDiffFileTokens(toDispatch[i])
+			projected := used + nextEst
+			if projected > a.args.MaxTokensBudget {
+				fmt.Fprintf(stdout.Writer(), "[ocr] token budget reached (used %s + next-file est %s = projected %s > budget %s) — skipping %s and remaining files\n",
+					humanTokens(used), humanTokens(nextEst), humanTokens(projected), humanTokens(a.args.MaxTokensBudget), toDispatch[i].NewPath)
+				a.recordWarning("token_budget_reached", toDispatch[i].NewPath,
+					fmt.Sprintf("stopped dispatch: used %d tokens + next-file estimate %d = projected %d exceeds budget %d", used, nextEst, projected, a.args.MaxTokensBudget))
+				a.budgetExceeded = true
+				// Reaching a user-configured budget is a *controlled coverage
+				// truncation*, not a run-level failure: the run did exactly what it
+				// was told to do, and everything it finished before the cap is a
+				// valid result. So record a pending failure cause rather than a
+				// run_failure — Finalize then attributes every item that never got
+				// dispatched to failed(budget) while the terminal state stays
+				// coverage-derived (partial with any completed/reused item, failed
+				// only when the cap left nothing covered).
+				//
+				// Deliberately NOT SetRunFailure: that would force terminal_state to
+				// failed regardless of how much was covered, and it would claim the
+				// single first-wins run_failure slot, blocking a genuine run-level
+				// cause raised later, such as a global deadline or user cancellation,
+				// from being recorded at all.
+				// RunFailureBudget stays reserved for a real run-level budget
+				// anomaly, e.g. a corrupted budget counter that makes per-item
+				// coverage undeterminable.
+				if b := a.session.Manifest(); b != nil {
+					if err := b.SetPendingFailureCause(session.FailureBudget, "aggregate token budget reached before dispatch completed"); err != nil {
+						a.recordWarning("manifest_error", "", err.Error())
+					}
+				}
+				break
+			}
+		}
+
 		dispatched++
 		wg.Add(1)
 		sem <- struct{}{} // acquire semaphore
 
 		go func(d model.Diff) {
+			fingerprint := reviewItemFingerprint(a.reviewMode(), d)
 			defer wg.Done()
 			defer func() { <-sem }() // release
+			// A panic while reviewing one file must be isolated exactly like an
+			// error return: counted in subtaskFailed and recorded as a
+			// subtask_error warning, so other files still complete and the
+			// all-failed rollup below stays correct. Registered before the
+			// timeout-cancel defer, so cancel() still runs first on unwind and
+			// fileCtx is already cancelled here — use the parent ctx for telemetry.
+			defer func() {
+				if r := recover(); r != nil {
+					atomic.AddInt64(&a.subtaskFailed, 1)
+					// The recovered panic value can carry arbitrary text; record a
+					// fixed, safe reason in the manifest and keep the detailed value
+					// only in the local checkpoint / warning.
+					a.markFailed(d, session.FailurePanic, "subtask panicked during review")
+					a.session.RecordReviewItemFailed(d.NewPath, d.OldPath, d.NewPath, fingerprint, fmt.Sprintf("panic: %v", r))
+					fmt.Fprintf(stdout.Writer(), "[ocr] Subtask panic for %s: %v\n%s\n", d.NewPath, r, debug.Stack())
+					telemetry.ErrorEvent(ctx, "subtask.panic", fmt.Errorf("panic: %v", r),
+						telemetry.AnyToAttr("file.path", d.NewPath))
+					a.recordWarning("subtask_error", d.NewPath, fmt.Sprintf("panic: %v", r))
+				}
+			}()
 
 			var fileCtx context.Context
 			var cancel context.CancelFunc
@@ -466,20 +610,47 @@ func (a *Agent) dispatchSubtasks(ctx context.Context) ([]model.LlmComment, error
 				fileCtx = ctx
 			}
 
-			if err := a.executeSubtask(fileCtx, d); err != nil {
+			completed, stop, err := a.executeSubtask(fileCtx, d)
+			if err != nil {
 				atomic.AddInt64(&a.subtaskFailed, 1)
+				// Classify from the error's structured shape (deadline/cancel/
+				// config/provider); never write the raw err into the manifest.
+				class, reason := classifyItemError(err)
+				a.markFailed(d, class, reason)
+				a.session.RecordReviewItemFailed(d.NewPath, d.OldPath, d.NewPath, fingerprint, err.Error())
 				fmt.Fprintf(stdout.Writer(), "[ocr] Subtask error for %s: %v\n", d.NewPath, err)
 				telemetry.ErrorEvent(fileCtx, "subtask.error", err,
 					telemetry.AnyToAttr("file.path", d.NewPath))
 				a.recordWarning("subtask_error", d.NewPath, err.Error())
+				return
 			}
-		}(a.diffs[i])
+			if !completed {
+				if stop != nil {
+					a.markFailed(d, stop.class, stop.reason)
+					if stop.checkpoint != "" {
+						a.session.RecordReviewItemFailed(d.NewPath, d.OldPath, d.NewPath, fingerprint, stop.checkpoint)
+					}
+					if stop.reportAsError {
+						atomic.AddInt64(&a.subtaskFailed, 1)
+						stopErr := errors.New(stop.checkpoint)
+						fmt.Fprintf(stdout.Writer(), "[ocr] Subtask error for %s: %v\n", d.NewPath, stopErr)
+						telemetry.ErrorEvent(fileCtx, "subtask.error", stopErr,
+							telemetry.AnyToAttr("file.path", d.NewPath))
+						a.recordWarning("subtask_error", d.NewPath, stopErr.Error())
+					}
+				}
+				return
+			}
+			comments := a.args.CommentCollector.CommentsForPath(d.NewPath)
+			a.markCompleted(d)
+			a.session.RecordReviewItemDone(d.NewPath, d.OldPath, d.NewPath, fingerprint, comments)
+		}(toDispatch[i])
 	}
 
 	wg.Wait()
 
 	if dispatched == 0 {
-		return []model.LlmComment{}, nil
+		return a.args.CommentCollector.Comments(), nil
 	}
 
 	// All subtasks finished — collect comments from the global collector once.
@@ -488,15 +659,436 @@ func (a *Agent) dispatchSubtasks(ctx context.Context) ([]model.LlmComment, error
 	}
 
 	failed := atomic.LoadInt64(&a.subtaskFailed)
-	if failed > 0 && failed == dispatched {
+	reused := int64(0)
+	if a.resumeInfo != nil {
+		reused = a.resumeInfo.ReusedFiles
+	}
+	// A resumed run can still have usable coverage when every newly dispatched
+	// subtask hard-fails. Preserve the legacy all-failed error only when there is
+	// no reused result; otherwise the manifest is partial and must exit 0.
+	if failed > 0 && failed == dispatched && reused == 0 {
 		return nil, fmt.Errorf("all %d file review(s) failed — check your LLM configuration and API key", dispatched)
 	}
 
 	return a.args.CommentCollector.Comments(), nil
 }
 
-// executeSubtask performs the Plan Phase + Main Loop for a single file.
-func (a *Agent) executeSubtask(ctx context.Context, d model.Diff) error {
+func (a *Agent) applyResume(diffs []model.Diff) []model.Diff {
+	resume := a.args.Resume
+	if resume == nil {
+		return diffs
+	}
+
+	mode := a.reviewMode()
+	toDispatch := make([]model.Diff, 0, len(diffs))
+	var reused int64
+	for _, d := range diffs {
+		if d.IsDeleted {
+			toDispatch = append(toDispatch, d)
+			continue
+		}
+		fingerprint := reviewItemFingerprint(mode, d)
+		item, ok := resume.Item(fingerprint)
+		if !ok {
+			toDispatch = append(toDispatch, d)
+			continue
+		}
+		for _, cm := range item.Comments {
+			a.args.CommentCollector.Add(cm)
+		}
+		a.session.RecordReviewItemReused(effectivePath(d), d.OldPath, d.NewPath, fingerprint, resume.SessionID, item.Comments)
+		a.markReused(d)
+		reused++
+	}
+
+	rerun := countDispatchable(toDispatch)
+	a.resumeInfo = &ResumeInfo{
+		ResumedFrom:   resume.SessionID,
+		ReusedFiles:   reused,
+		RerunFiles:    rerun,
+		PreviousModel: resume.Model,
+		CurrentModel:  a.args.Model,
+	}
+	fmt.Fprintf(stdout.Writer(), "[ocr] Resume %s: reusing %d file(s), reviewing %d file(s)\n", resume.SessionID, reused, rerun)
+	return toDispatch
+}
+
+func countDispatchable(diffs []model.Diff) int64 {
+	var n int64
+	for _, d := range diffs {
+		if !d.IsDeleted {
+			n++
+		}
+	}
+	return n
+}
+
+func (a *Agent) reviewMode() string {
+	if a.args.ReviewMode != "" {
+		return a.args.ReviewMode
+	}
+	return reviewModeString(a.args.From, a.args.To, a.args.Commit)
+}
+
+func reviewItemFingerprint(mode string, d model.Diff) string {
+	sum := sha256.Sum256([]byte(mode + "\x00" + d.OldPath + "\x00" + d.NewPath + "\x00" + d.Diff))
+	return fmt.Sprintf("%x", sum)
+}
+
+// initManifest seeds the run manifest with this run's input identity and
+// execution provenance. It is nil-safe (the builder is absent on the delegate
+// preview path, which never runs a review) and records the direct parent run for
+// a resume. The resolved commit SHAs, source-artifact and config hashes, and
+// repository identity are filled by a later phase; the mandatory input.mode is
+// set here so the manifest is always constructible.
+func (a *Agent) initManifest() {
+	b := a.session.Manifest()
+	if b == nil {
+		return
+	}
+	if parent := resumedFromSession(a.args.Resume); parent != "" {
+		b.SetParentRunID(parent)
+	}
+	b.SetInput(a.manifestInput())
+	b.SetExecution(session.ManifestExecution{
+		OCRVersion:            llm.AppVersion,
+		Provider:              a.args.Provider,
+		Model:                 a.args.Model,
+		ConfiguredConcurrency: a.args.MaxConcurrency,
+		RuleConfigSHA256:      a.ruleConfigSHA256(),
+		RuntimeConfigSHA256:   a.runtimeConfigSHA256(),
+	})
+}
+
+// manifestMode maps the review to the manifest input mode. It derives purely
+// from From/To/Commit so the value is always one of the three valid input modes
+// and stays stable across a resume chain (independent of an explicit ReviewMode
+// label). It is also the mode component of every item_id.
+func (a *Agent) manifestMode() string {
+	return reviewModeString(a.args.From, a.args.To, a.args.Commit)
+}
+
+// manifestInput builds the frozen input identity per the input-mode field
+// matrix: range carries both requested refs, commit carries only the requested
+// head, workspace carries neither.
+func (a *Agent) manifestInput() session.ManifestInput {
+	in := session.ManifestInput{Mode: a.manifestMode()}
+	switch in.Mode {
+	case session.InputModeRange:
+		in.RequestedFrom = a.args.From
+		in.RequestedHead = a.args.To
+	case session.InputModeCommit:
+		in.RequestedHead = a.args.Commit
+	}
+	return in
+}
+
+// applyInputIdentity fills the manifest's frozen input identity and repository
+// identity, then hands them to the builder through its single setters. It is the
+// one authoritative assembly point (called from finalizeManifest, which runs on
+// every terminal path): requested refs and mode come from manifestInput, the
+// resolved commit endpoints from the git resolution captured in loadDiffs, and
+// source_artifact_sha256 from the current selected set — so a skipped or failed
+// run still records the real input it was given. Caller ensures b != nil.
+func (a *Agent) applyInputIdentity(b *session.ManifestBuilder) {
+	in := a.manifestInput()
+	in.ResolvedBase = a.inputResolution.ResolvedBase
+	in.ResolvedHead = a.inputResolution.ResolvedHead
+	in.ExactRange = a.inputResolution.ExactRange
+	in.SourceArtifactSHA256 = a.sourceArtifactSHA256()
+	b.SetInput(in)
+
+	if id := a.repoRemoteIdentity; id != "" {
+		sum := sha256.Sum256([]byte(id))
+		b.SetRepository(session.ManifestRepository{IdentitySHA256: hex.EncodeToString(sum[:])})
+	}
+}
+
+// sourceArtifactSHA256 is the deterministic content identity of this run's
+// selected input: for every non-deleted diff (the same set registerCoverage
+// seals), it pairs the content-independent item_id with the raw diff fingerprint,
+// sorts by item_id, and folds each field into SHA-256 with an unambiguous 8-byte
+// big-endian length prefix so no two distinct field sequences can collide. The
+// empty selected set yields the canonical empty-input digest. It uses the raw
+// fingerprint (not item_id) so a content change to the same logical file changes
+// the artifact — exactly what a resume needs to detect a moved ref's new input.
+//
+// Items are deduplicated by item_id (first wins) so the hash denominator matches
+// the sealed selected set — RegisterSelected ignores a duplicate item_id, so two
+// diffs that normalize to the same (mode, old, new) contribute one selected item
+// and must contribute one artifact entry too, keeping the two in lockstep and the
+// digest deterministic regardless of diff iteration order.
+func (a *Agent) sourceArtifactSHA256() string {
+	type pair struct{ id, fingerprint string }
+	pairs := make([]pair, 0, len(a.diffs))
+	seen := make(map[string]struct{}, len(a.diffs))
+	for _, d := range a.diffs {
+		if d.IsDeleted {
+			continue
+		}
+		id := a.manifestItemID(d)
+		if _, dup := seen[id]; dup {
+			continue // first wins, matching RegisterSelected's dedup
+		}
+		seen[id] = struct{}{}
+		pairs = append(pairs, pair{id, reviewItemFingerprint(a.reviewMode(), d)})
+	}
+	sort.SliceStable(pairs, func(i, j int) bool { return pairs[i].id < pairs[j].id })
+
+	fields := make([]string, 0, len(pairs)*2)
+	for _, p := range pairs {
+		fields = append(fields, p.id, p.fingerprint)
+	}
+	return hashFields(fields...)
+}
+
+// ruleConfigSHA256 is the deterministic identity of the resolved rule
+// configuration this run operates with: the resolver's effective rule-text
+// layers (custom > project > global > system, order preserved) plus the applied
+// include/exclude file filter. It asks the resolver for its canonical field list
+// through an optional interface — a resolver that does not expose one contributes
+// only the file filter — and folds everything with the same length-prefixed
+// framing as source_artifact, so any change to any layer or filter changes the
+// digest. Rule order is significant (first match wins) and never sorted.
+func (a *Agent) ruleConfigSHA256() string {
+	var fields []string
+	if cc, ok := a.args.SystemRule.(interface{ CanonicalConfig() []string }); ok {
+		fields = append(fields, cc.CanonicalConfig()...)
+	}
+	if f := a.args.FileFilter; f != nil {
+		for _, inc := range f.Include {
+			fields = append(fields, "include", inc)
+		}
+		for _, exc := range f.Exclude {
+			fields = append(fields, "exclude", exc)
+		}
+	}
+	return hashFields(fields...)
+}
+
+// runtimeConfigSHA256 is the deterministic identity of the allowlisted, non-secret
+// runtime settings: protocol, model, sanitized endpoint host, language, per-request
+// timeout, configured concurrency and the aggregate token budget. Every field is
+// tagged so structurally different configs cannot collide once length-prefixed. No
+// secret ever reaches this hash — RuntimeConfig carries only the credential-free
+// host, never the token or full URL.
+//
+// max_tokens_budget participates because it changes what coverage a run can even
+// attempt: two otherwise-identical runs with different budgets are not
+// interchangeable when auditing why one stopped short.
+func (a *Agent) runtimeConfigSHA256() string {
+	r := a.args.RuntimeConfig
+	return hashFields(
+		"protocol", r.Protocol,
+		"model", a.args.Model,
+		"host", r.EndpointHost,
+		"language", r.Language,
+		"timeout", r.Timeout.String(),
+		"concurrency", strconv.Itoa(a.args.MaxConcurrency),
+		"max_tokens_budget", strconv.FormatInt(a.args.MaxTokensBudget, 10),
+	)
+}
+
+// hashFields folds a sequence of string fields into one SHA-256 digest, writing an
+// unambiguous 8-byte big-endian length prefix before each field so no two distinct
+// field sequences can collide at a boundary. The empty sequence yields the
+// canonical empty-input SHA-256. Returns the lowercase hex digest.
+func hashFields(fields ...string) string {
+	h := sha256.New()
+	var lenBuf [8]byte
+	for _, f := range fields {
+		binary.BigEndian.PutUint64(lenBuf[:], uint64(len(f)))
+		h.Write(lenBuf[:])
+		_, _ = h.Write([]byte(f))
+	}
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+// manifestPaths returns the old/new paths for identity derivation with the
+// "/dev/null" sentinel (added/deleted files) collapsed to empty, so it never
+// pollutes an item_id or a displayed path.
+func manifestPaths(d model.Diff) (oldPath, newPath string) {
+	oldPath, newPath = d.OldPath, d.NewPath
+	if oldPath == "/dev/null" {
+		oldPath = ""
+	}
+	if newPath == "/dev/null" {
+		newPath = ""
+	}
+	return oldPath, newPath
+}
+
+// manifestItemID derives the content-independent item_id for a diff, keyed on
+// operation, input mode and the normalized old/new paths. RegisterSelected and
+// every Mark* must go through this one helper so a mismatched key can never
+// silently no-op a transition.
+func (a *Agent) manifestItemID(d model.Diff) string {
+	oldPath, newPath := manifestPaths(d)
+	return session.ItemID(session.OperationReview, a.manifestMode(), oldPath, newPath)
+}
+
+// coverageItem builds the selected-set entry for a diff: the content-independent
+// item_id, the display path, the old path only on a rename, and the raw diff
+// fingerprint retained for checkpoint cross-referencing.
+func (a *Agent) coverageItem(d model.Diff) session.CoverageItem {
+	oldPath, newPath := manifestPaths(d)
+	item := session.CoverageItem{
+		ItemID:      a.manifestItemID(d),
+		Path:        effectivePath(d),
+		Fingerprint: reviewItemFingerprint(a.reviewMode(), d),
+	}
+	if oldPath != "" && oldPath != newPath {
+		item.OldPath = oldPath
+	}
+	return item
+}
+
+// markCompleted/markReused/markFailed are nil-safe manifest transitions. A
+// non-nil error here is an internal invariant violation (a mis-keyed or
+// duplicate transition), never an expected outcome, so it is surfaced as a
+// warning rather than silently dropped; Finalize's validation is the backstop.
+func (a *Agent) markCompleted(d model.Diff) {
+	b := a.session.Manifest()
+	if b == nil {
+		return
+	}
+	if err := b.MarkCompleted(a.manifestItemID(d)); err != nil {
+		a.recordWarning("manifest_error", d.NewPath, err.Error())
+	}
+}
+
+func (a *Agent) markReused(d model.Diff) {
+	b := a.session.Manifest()
+	if b == nil {
+		return
+	}
+	if err := b.MarkReused(a.manifestItemID(d)); err != nil {
+		a.recordWarning("manifest_error", d.NewPath, err.Error())
+	}
+}
+
+func (a *Agent) markFailed(d model.Diff, class session.FailureClass, reason string) {
+	b := a.session.Manifest()
+	if b == nil {
+		return
+	}
+	if err := b.MarkFailed(a.manifestItemID(d), class, reason); err != nil {
+		a.recordWarning("manifest_error", d.NewPath, err.Error())
+	}
+}
+
+// errMainTaskEmpty is returned when the review template carries no main_task
+// messages. It is a sentinel so callers classify it with errors.Is instead of
+// matching error text, which silently breaks the moment the wording changes.
+var errMainTaskEmpty = errors.New("main_task.messages is empty in template")
+
+// classifyItemError maps a subtask error to a stable item failure class and a
+// safe, generic reason. It never returns the raw error text (which may embed a
+// provider payload, credentials or absolute paths); the full error is persisted
+// separately in the session checkpoint. Context deadline/cancel are recognized
+// via errors.Is (the per-file timeout is the only deadline in play), and the
+// empty-template precondition is a configuration failure.
+func classifyItemError(err error) (session.FailureClass, string) {
+	switch {
+	case errors.Is(err, context.DeadlineExceeded):
+		return session.FailureTimeout, "file review exceeded its time limit"
+	case errors.Is(err, context.Canceled):
+		return session.FailureCancelled, "file review was cancelled"
+	case errors.Is(err, errMainTaskEmpty):
+		return session.FailureConfiguration, "review template main_task is empty"
+	default:
+		return session.FailureProvider, "provider or subtask request failed"
+	}
+}
+
+// classifyMainLoopStop maps a non-error, non-completed main-loop stop to an item
+// failure class and a safe reason. Only the configured max-tool-request budget is
+// a declared budget stop; the empty-round and compression exits are genuine but
+// unclassifiable, so they map to the honest unknown catch-all. Only an explicit
+// budget trigger may use the budget classification.
+func classifyMainLoopStop(stop llmloop.MainLoopStop) (session.FailureClass, string) {
+	switch stop {
+	case llmloop.StopMaxRounds:
+		return session.FailureBudget, "reached the maximum tool-request rounds without finishing"
+	default: // StopEmptyRounds, StopCompression, StopNone
+		return session.FailureUnknown, "main task stopped before completing"
+	}
+}
+
+// subtaskStop is the structured, non-error reason a single-file review stopped
+// short of task_done. It lets the dispatcher classify manifest coverage from an
+// explicit cause recorded at the trigger point, instead of re-parsing free text
+// or ctx state. class + reason feed the manifest MarkFailed; checkpoint is the
+// detailed human-facing text preserved for the legacy RecordReviewItemFailed
+// resume record (unchanged behavior).
+type subtaskStop struct {
+	class         session.FailureClass
+	reason        string
+	checkpoint    string
+	reportAsError bool
+}
+
+// registerCoverage freezes the coverage denominator before any reuse or
+// concurrent dispatch: it registers every non-deleted diff as a selected item
+// and seals the set. Deleted files are excluded — they are never dispatched, so
+// a registered item that never received a Mark* would be swept to a bogus
+// failure at Finalize. Nil-safe (no-op without a builder). It returns the first
+// registration or seal error so the caller can flag the denominator as
+// untrustworthy.
+func (a *Agent) registerCoverage(diffs []model.Diff) error {
+	b := a.session.Manifest()
+	if b == nil {
+		return nil
+	}
+	for _, d := range diffs {
+		if d.IsDeleted {
+			continue
+		}
+		if err := b.RegisterSelected(a.coverageItem(d)); err != nil {
+			return err
+		}
+	}
+	return b.SealSelected()
+}
+
+// finalizeManifest freezes the run's coverage builder and stores the immutable
+// manifest on the session for persistence and CLI consumption. Nil-safe. A
+// construction (validation) failure leaves the stored manifest nil — session_end
+// then persists in legacy form — and is returned as a delivery error so the CLI
+// cannot report a manifest-enabled review as successful without a valid snapshot.
+// Elapsed is measured from the session start so both outlets report the same duration.
+func (a *Agent) finalizeManifest() error {
+	b := a.session.Manifest()
+	if b == nil {
+		return nil
+	}
+	// Freeze the input/repository identity from this run's captured resolution and
+	// current selected set before the manifest closes. Done here (not in New) so
+	// the git-resolved endpoints and the post-filter source artifact are both
+	// available, and so every terminal path records the same identity.
+	a.applyInputIdentity(b)
+	m, err := b.Finalize(time.Since(a.session.StartTime))
+	if err != nil {
+		a.recordWarning("manifest_error", "", err.Error())
+		return fmt.Errorf("finalize run manifest: %w", err)
+	}
+	a.session.SetFinalManifest(&m)
+	return nil
+}
+
+func resumedFromSession(resume *session.ResumeState) string {
+	if resume == nil {
+		return ""
+	}
+	return resume.SessionID
+}
+
+// executeSubtask performs the Plan Phase + Main Loop for a single file. It
+// returns (completed, stop, err): a hard Go error (err) for provider/config/ctx
+// failures the caller classifies via classifyItemError, or a structured *stop
+// for a non-error early exit (token budget, main-loop stop) carrying the manifest
+// class recorded at its trigger point. A completed review returns (true, nil, nil).
+func (a *Agent) executeSubtask(ctx context.Context, d model.Diff) (bool, *subtaskStop, error) {
 	ctx, span := telemetry.StartSpan(ctx, "subtask.execute."+d.NewPath)
 	defer span.End()
 	telemetry.SetAttr(span, "file.path", d.NewPath)
@@ -505,7 +1097,7 @@ func (a *Agent) executeSubtask(ctx context.Context, d model.Diff) error {
 	telemetry.SetAttr(span, "lines.deleted", d.Deletions)
 
 	if ctx.Err() != nil {
-		return ctx.Err()
+		return false, nil, ctx.Err()
 	}
 
 	newPath := d.NewPath
@@ -539,7 +1131,7 @@ func (a *Agent) executeSubtask(ctx context.Context, d model.Diff) error {
 
 	// Phase 2: Main task loop
 	if len(a.args.Template.MainTask.Messages) == 0 {
-		return fmt.Errorf("main_task.messages is empty in template")
+		return false, nil, errMainTaskEmpty
 	}
 
 	rawMsgs := a.args.Template.MainTask.Messages
@@ -566,9 +1158,9 @@ func (a *Agent) executeSubtask(ctx context.Context, d model.Diff) error {
 		messages = append(messages, llm.NewTextMessage(m.Role, content))
 	}
 
-	tokenCount := countMessagesTokens(messages)
+	tokenCount := llmloop.CountMessagesTokens(messages)
 	maxAllowed := a.args.Template.MaxTokens
-	tokenLimit := maxAllowed * 4 / 5 // 80% of MaxTokens
+	tokenLimit := llmloop.PromptTokenLimit(maxAllowed)
 	if tokenCount > tokenLimit {
 		msg := fmt.Sprintf("prompt tokens (%d) exceed %d%% of max_tokens(%d)", tokenCount, 80, maxAllowed)
 		fmt.Fprintf(stdout.Writer(), "[ocr] WARNING: %s for %s\n", msg, newPath)
@@ -577,10 +1169,165 @@ func (a *Agent) executeSubtask(ctx context.Context, d model.Diff) error {
 			telemetry.AnyToAttr("file.path", newPath),
 			telemetry.AnyToAttr("tokens", tokenCount),
 			telemetry.AnyToAttr("max_tokens", maxAllowed))
-		return nil
+		// The prompt itself blows the configured token budget: an explicit,
+		// declared budget stop. Keep the detailed token message only in the
+		// checkpoint; the manifest reason stays generic.
+		return false, &subtaskStop{
+			class:      session.FailureBudget,
+			reason:     "prompt exceeded the configured token budget",
+			checkpoint: msg,
+		}, nil
 	}
 
-	return a.performLlmCodeReview(ctx, messages, newPath)
+	mainCompleted, mainStop, err := func() (bool, llmloop.MainLoopStop, error) {
+		ctx, mainSpan := telemetry.StartSpan(ctx, "main.loop")
+		defer mainSpan.End()
+		telemetry.SetAttr(mainSpan, "file.path", newPath)
+		completed, stop, err := a.runner.RunPerFile(ctx, messages, newPath)
+		if err != nil {
+			mainSpan.SetStatus(codes.Error, err.Error())
+			mainSpan.RecordError(err)
+			return false, stop, err
+		}
+		return completed, stop, nil
+	}()
+	if err == nil {
+		// REVIEW_FILTER_TASK runs after the main loop and decides which of the
+		// just-collected comments to drop. It needs to see comments produced by
+		// this file's async CommentWorkerPool units, so wait for those to drain
+		// first. This must be keyed to newPath: a pool-wide Await here would run
+		// concurrently with other files' Submit calls and misuses sync.WaitGroup
+		// ("Add called concurrently with Wait").
+		if a.args.CommentWorkerPool != nil {
+			a.args.CommentWorkerPool.AwaitKey(newPath)
+		}
+		a.executeReviewFilter(ctx, d, newPath)
+	}
+	if err != nil {
+		return false, nil, err
+	}
+	if !mainCompleted {
+		// Distinguish the stop cause at its trigger point: max-rounds is budget,
+		// empty-round / compression are the honest unknown catch-all.
+		class, reason := classifyMainLoopStop(mainStop)
+		return false, &subtaskStop{
+			class:         class,
+			reason:        reason,
+			checkpoint:    "main_task did not complete before stopping",
+			reportAsError: true,
+		}, nil
+	}
+	return true, nil, nil
+}
+
+// executeReviewFilter runs the REVIEW_FILTER_TASK to remove comments that are
+// provably incorrect based solely on the diff. Errors are logged and silently ignored.
+func (a *Agent) executeReviewFilter(ctx context.Context, d model.Diff, newPath string) {
+	ctx, span := telemetry.StartSpan(ctx, "review_filter.execute")
+	defer span.End()
+	telemetry.SetAttr(span, "file.path", newPath)
+
+	ft := a.args.Template.ReviewFilterTask
+	if ft == nil || len(ft.Messages) == 0 {
+		return
+	}
+
+	comments := a.args.CommentCollector.CommentsForPath(newPath)
+	if len(comments) == 0 {
+		return
+	}
+	telemetry.SetAttr(span, "comments.before", len(comments))
+
+	commentsJSON := buildFilterCommentsJSON(comments)
+
+	messages := make([]llm.Message, 0, len(ft.Messages))
+	for _, m := range ft.Messages {
+		content := m.Content
+		content = strings.ReplaceAll(content, "{{path}}", newPath)
+		content = strings.ReplaceAll(content, "{{diff}}", d.Diff)
+		content = strings.ReplaceAll(content, "{{comments}}", commentsJSON)
+		messages = append(messages, llm.NewTextMessage(m.Role, content))
+	}
+
+	fs := a.session.GetOrCreateFileSession(newPath)
+	rec := fs.AppendTaskRecord(session.ReviewFilterTask, messages)
+	startTime := time.Now()
+
+	_, llmSpan := telemetry.StartLLMSpan(ctx, a.args.Model)
+	resp, err := a.args.LLMClient.CompletionsWithCtx(ctx, llm.ChatRequest{
+		Model:     a.args.Model,
+		Messages:  messages,
+		MaxTokens: a.args.Template.MaxTokens,
+	})
+	duration := time.Since(startTime)
+	if err != nil {
+		telemetry.RecordLLMResult(llmSpan, duration, 0, err)
+		llmSpan.End()
+		rec.SetError(err, duration)
+		fmt.Fprintf(stdout.Writer(), "[ocr] Review filter failed for %s: %v\n", newPath, err)
+		span.SetStatus(codes.Error, err.Error())
+		span.RecordError(err)
+		return
+	}
+	var totalTokens int64
+	if resp.Usage != nil {
+		totalTokens = resp.Usage.TotalTokens
+	}
+	telemetry.RecordLLMResult(llmSpan, duration, totalTokens, nil)
+	llmSpan.End()
+	rec.SetResponse(resp, duration)
+	a.runner.RecordUsage(resp.Usage)
+
+	indices := parseFilterResponse(resp.Content(), len(comments))
+	telemetry.SetAttr(span, "comments.filtered", len(indices))
+	if len(indices) == 0 {
+		return
+	}
+
+	a.args.CommentCollector.RemoveByPathAndIndices(newPath, indices)
+	fmt.Fprintf(stdout.Writer(), "[ocr] Review filter removed %d comment(s) for %s\n", len(indices), newPath)
+}
+
+// buildFilterCommentsJSON serializes comments into a JSON array with generated IDs.
+func buildFilterCommentsJSON(comments []model.LlmComment) string {
+	type filterComment struct {
+		ID           string `json:"id"`
+		Content      string `json:"content"`
+		ExistingCode string `json:"existing_code,omitempty"`
+	}
+	items := make([]filterComment, len(comments))
+	for i, cm := range comments {
+		items[i] = filterComment{
+			ID:           fmt.Sprintf("c-%d", i),
+			Content:      cm.Content,
+			ExistingCode: cm.ExistingCode,
+		}
+	}
+	data, _ := json.Marshal(items)
+	return string(data)
+}
+
+// parseFilterResponse extracts comment indices from the LLM filter response.
+// Returns a set of 0-based indices. Invalid IDs or out-of-range indices are ignored.
+func parseFilterResponse(raw string, total int) map[int]struct{} {
+	raw = llmloop.StripMarkdownFences(raw)
+	var ids []string
+	if err := json.Unmarshal([]byte(raw), &ids); err != nil {
+		preview := raw
+		if len(preview) > 200 {
+			preview = preview[:200] + "..."
+		}
+		fmt.Fprintf(stdout.Writer(), "[ocr] Review filter: failed to parse LLM response: %v, raw: %s\n", err, preview)
+		return nil
+	}
+	indices := make(map[int]struct{})
+	for _, id := range ids {
+		var idx int
+		if _, err := fmt.Sscanf(id, "c-%d", &idx); err == nil && idx >= 0 && idx < total {
+			indices[idx] = struct{}{}
+		}
+	}
+	return indices
 }
 
 // buildChangeFilesExcept returns a formatted list of changed files except the given path.
@@ -621,7 +1368,7 @@ func (a *Agent) resolveSystemRule(path string) string {
 
 // filterLargeDiffs drops diffs whose diff content alone consumes more than 80% of MaxTokens.
 func (a *Agent) filterLargeDiffs(diffs []model.Diff) []model.Diff {
-	limit := a.args.Template.MaxTokens * 4 / 5
+	limit := llmloop.PromptTokenLimit(a.args.Template.MaxTokens)
 	if limit <= 0 {
 		return diffs
 	}
@@ -707,6 +1454,10 @@ func (a *Agent) extFromPath(path string) string {
 // executePlanPhase runs the plan task for a single file, sending template messages
 // with resolved placeholders and collecting the LLM response as plan guidance.
 func (a *Agent) executePlanPhase(ctx context.Context, newPath, rawDiff, changeFiles, rule string) (string, error) {
+	ctx, span := telemetry.StartSpan(ctx, "plan.execute")
+	defer span.End()
+	telemetry.SetAttr(span, "file.path", newPath)
+
 	pt := a.args.Template.PlanTask
 	messages := make([]llm.Message, 0, len(pt.Messages))
 	for _, m := range pt.Messages {
@@ -725,22 +1476,29 @@ func (a *Agent) executePlanPhase(ctx context.Context, newPath, rawDiff, changeFi
 	rec := fs.AppendTaskRecord(session.PlanTask, messages)
 	startTime := time.Now()
 
+	_, llmSpan := telemetry.StartLLMSpan(ctx, a.args.Model)
 	resp, err := a.args.LLMClient.CompletionsWithCtx(ctx, llm.ChatRequest{
 		Model:     a.args.Model,
 		Messages:  messages,
 		MaxTokens: a.args.Template.MaxTokens,
 	})
+	duration := time.Since(startTime)
 	if err != nil {
-		rec.SetError(err, time.Since(startTime))
+		telemetry.RecordLLMResult(llmSpan, duration, 0, err)
+		llmSpan.End()
+		rec.SetError(err, duration)
+		span.SetStatus(codes.Error, err.Error())
+		span.RecordError(err)
 		return "", fmt.Errorf("plan request: %w", err)
 	}
-	rec.SetResponse(resp, time.Since(startTime))
+	var totalTokens int64
 	if resp.Usage != nil {
-		atomic.AddInt64(&a.totalInputTokens, resp.Usage.PromptTokens)
-		atomic.AddInt64(&a.totalOutputTokens, resp.Usage.CompletionTokens)
-		atomic.AddInt64(&a.totalCacheReadTokens, resp.Usage.CacheReadTokens)
-		atomic.AddInt64(&a.totalCacheWriteTokens, resp.Usage.CacheWriteTokens)
+		totalTokens = resp.Usage.TotalTokens
 	}
+	telemetry.RecordLLMResult(llmSpan, duration, totalTokens, nil)
+	llmSpan.End()
+	rec.SetResponse(resp, duration)
+	a.runner.RecordUsage(resp.Usage)
 	fmt.Fprintf(stdout.Writer(), "[ocr] Plan completed for %s\n", newPath)
 	return resp.Content(), nil
 }
@@ -783,237 +1541,6 @@ func formatToolDefs(toolDefs []llm.ToolDef) string {
 	return sb.String()
 }
 
-// performLlmCodeReview drives the main LLM conversation loop for a single file.
-// It sends messages with tool definitions, handles tool calls returned by the model,
-// and collects review comments until task_done is called or limits are reached.
-func (a *Agent) performLlmCodeReview(ctx context.Context, messages []llm.Message, newPath string) error {
-	toolReqCount := a.args.Template.MaxToolRequestTimes
-	const maxConsecutiveEmptyRounds = 3
-	consecutiveEmptyRounds := 0
-
-	for toolReqCount > 0 {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
-		}
-
-		toolReqCount--
-
-		fs := a.session.GetOrCreateFileSession(newPath)
-		rec := fs.AppendTaskRecord(session.MainTask, append([]llm.Message(nil), messages...))
-		startTime := time.Now()
-
-		resp, err := a.args.LLMClient.CompletionsWithCtx(ctx, llm.ChatRequest{
-			Model:     a.args.Model,
-			Messages:  messages,
-			Tools:     a.args.MainToolDefs,
-			MaxTokens: a.args.Template.MaxTokens,
-		})
-		duration := time.Since(startTime)
-		if err != nil {
-			rec.SetError(err, duration)
-			telemetry.RecordLLMRequest(ctx, a.args.Model, duration, 0, "error")
-			return fmt.Errorf("LLM completion error: %w", err)
-		}
-		rec.SetResponse(resp, duration)
-		// Record LLM metrics with token info from API response usage field.
-		totalTokens := int64(0)
-		if resp.Usage != nil {
-			totalTokens = resp.Usage.TotalTokens
-			atomic.AddInt64(&a.totalInputTokens, resp.Usage.PromptTokens)
-			atomic.AddInt64(&a.totalOutputTokens, resp.Usage.CompletionTokens)
-			atomic.AddInt64(&a.totalCacheReadTokens, resp.Usage.CacheReadTokens)
-			atomic.AddInt64(&a.totalCacheWriteTokens, resp.Usage.CacheWriteTokens)
-		}
-		telemetry.RecordLLMRequest(ctx, a.args.Model, duration, totalTokens, "ok")
-
-		content := resp.Content()
-		calls := resp.ToolCalls()
-
-		if len(calls) == 0 {
-			// No tool calls - remind the model
-			fmt.Fprintf(stdout.Writer(), "[ocr] No tool calls parsed for %s, retrying...\n", newPath)
-			messages = append(messages, llm.NewTextMessage("user", "You did not successfully call any tools. Please try again or use task_done if finished."))
-			if content != "" {
-				messages = append(messages[:len(messages)-1], llm.NewTextMessage("assistant", content), messages[len(messages)-1])
-			}
-			continue
-		}
-
-		var results []tool.ToolCallResult
-		taskCompleted := false
-		hasValidResult := false
-
-		for _, call := range calls {
-			cp := a.executeToolCall(ctx, newPath, call, rec)
-			if cp.Completed {
-				results = append(results, tool.ToolCallResult{
-					ToolCallID: call.ID,
-					Name:       call.Function.Name,
-					Result:     "Task completed successfully.",
-				})
-				taskCompleted = true
-			} else if cp.Data != "" {
-				results = append(results, tool.ToolCallResult{
-					ToolCallID: call.ID,
-					Name:       call.Function.Name,
-					Result:     cp.Data,
-				})
-				hasValidResult = true
-			} else {
-				results = append(results, tool.ToolCallResult{
-					ToolCallID: call.ID,
-					Name:       call.Function.Name,
-					Result:     "Error: Tool execution returned no result.",
-				})
-			}
-		}
-
-		if taskCompleted {
-			break
-		}
-		if !hasValidResult {
-			consecutiveEmptyRounds++
-			if consecutiveEmptyRounds >= maxConsecutiveEmptyRounds {
-				fmt.Fprintf(stdout.Writer(), "[ocr] Too many empty retries for %s, stopping.\n", newPath)
-				break
-			}
-			fmt.Fprintf(stdout.Writer(), "[ocr] No valid tool results for %s, retrying...\n", newPath)
-		} else {
-			consecutiveEmptyRounds = 0
-		}
-
-		succeed := a.addNextMessage(ctx, content, calls, results, &messages, newPath)
-		if !succeed {
-			fmt.Fprintf(stdout.Writer(), "[ocr] Context compression exceeded threshold for %s, stopping.\n", newPath)
-			break
-		}
-	}
-
-	if toolReqCount <= 0 {
-		fmt.Fprintf(stdout.Writer(), "[ocr] Max tool requests reached for %s.\n", newPath)
-	}
-
-	return nil
-}
-
-// executeToolCall executes a single tool call from the LLM response and records
-// the result in session history. It handles async dispatch for code_comment when
-// a worker pool is configured, otherwise runs synchronously.
-func (a *Agent) executeToolCall(ctx context.Context, newPath string, call llm.ToolCall, rec *session.TaskRecord) tool.TaskCheckpoint {
-	t := tool.OfName(call.Function.Name)
-	if !t.IsKnown() {
-		return tool.Of(tool.NotAvailableMsg)
-	}
-
-	if t == tool.TaskDone {
-		return tool.Complete()
-	}
-
-	p := lookupTool(a.args.Tools, t)
-	if p == nil {
-		return tool.Of(tool.NotAvailableMsg)
-	}
-
-	var args map[string]any
-	if err := json.Unmarshal([]byte(call.Function.Arguments), &args); err != nil {
-		return tool.Of(fmt.Sprintf("Error parsing tool arguments for %s: %v", t.Name(), err))
-	}
-
-	// Inject current file path as default for code_comment when not provided.
-	// The model already knows which file it's reviewing, so it omits path.
-	if t == tool.CodeComment && newPath != "" {
-		if _, ok := args["path"]; !ok {
-			args["path"] = newPath
-		}
-	}
-
-	startTime := time.Now()
-
-	// code_comment: parse → resolve line numbers → re-locate if needed → add to collector
-	if t == tool.CodeComment {
-		telemetry.PrintToolCallStarted(t.Name(), args)
-
-		comments, errMsg := tool.ParseComments(args)
-		if errMsg != "" {
-			telemetry.RecordToolCall(ctx, t.Name(), time.Since(startTime), false)
-			return tool.Of(errMsg)
-		}
-
-		resolveAndCollect := func(rctx context.Context) {
-			for i := range comments {
-				cm := &comments[i]
-				d := a.findDiff(cm.Path)
-				if d != nil {
-					if !diff.ResolveComment(cm, d) && a.args.Template.ReLocationTask != nil {
-						rlStart := time.Now()
-						_, resp, msgs := diff.ReLocateComment(rctx, cm, d, a.args.LLMClient, a.args.Template.ReLocationTask, a.args.Model, a.args.Template.MaxTokens)
-						if msgs != nil {
-							fs := a.session.GetOrCreateFileSession(cm.Path)
-							rlRec := fs.AppendTaskRecord(session.ReLocationTask, msgs)
-							if resp != nil {
-								rlRec.SetResponse(resp, time.Since(rlStart))
-								if resp.Usage != nil {
-									atomic.AddInt64(&a.totalInputTokens, resp.Usage.PromptTokens)
-									atomic.AddInt64(&a.totalOutputTokens, resp.Usage.CompletionTokens)
-									atomic.AddInt64(&a.totalCacheReadTokens, resp.Usage.CacheReadTokens)
-									atomic.AddInt64(&a.totalCacheWriteTokens, resp.Usage.CacheWriteTokens)
-								}
-							} else {
-								rlRec.SetError(fmt.Errorf("re-location LLM call failed"), time.Since(rlStart))
-							}
-						}
-					}
-				}
-				a.args.CommentCollector.Add(*cm)
-			}
-		}
-
-		if a.args.CommentWorkerPool != nil {
-			if rec != nil {
-				rec.AddToolResult(t.Name(), call.Function.Arguments, "(async)")
-			}
-			pool := a.args.CommentWorkerPool
-			asyncCtx := context.WithoutCancel(ctx)
-			toolName := t.Name()
-			pool.Submit(func() ([]model.LlmComment, error) {
-				resolveAndCollect(asyncCtx)
-				telemetry.PrintToolCallFinished(toolName, time.Since(startTime))
-				return []model.LlmComment{}, nil
-			})
-			telemetry.RecordToolCall(asyncCtx, toolName, time.Since(startTime), true)
-			return tool.Of(tool.CommentSucceed)
-		}
-
-		resolveAndCollect(ctx)
-		dur := time.Since(startTime)
-		telemetry.RecordToolCall(ctx, t.Name(), dur, true)
-		telemetry.PrintToolCallFinished(t.Name(), dur)
-		if rec != nil {
-			rec.AddToolResult(t.Name(), call.Function.Arguments, tool.CommentSucceed)
-		}
-		return tool.Of(tool.CommentSucceed)
-	}
-
-	// Synchronous path for all other tools
-	telemetry.PrintToolCallStarted(t.Name(), args)
-	result, err := p.Execute(ctx, args)
-	dur := time.Since(startTime)
-	ok := err == nil
-	telemetry.RecordToolCall(ctx, t.Name(), dur, ok)
-
-	if err != nil {
-		telemetry.PrintToolCallError(t.Name(), err)
-		return tool.Of(fmt.Sprintf("Error executing tool %s: %v", t.Name(), err))
-	}
-	telemetry.PrintToolCallFinished(t.Name(), dur)
-	if rec != nil {
-		rec.AddToolResult(t.Name(), call.Function.Arguments, result)
-	}
-	return tool.Of(result)
-}
-
 // findDiff returns the Diff for the given file path, or nil if not found.
 func (a *Agent) findDiff(path string) *model.Diff {
 	for i := range a.diffs {
@@ -1022,302 +1549,6 @@ func (a *Agent) findDiff(path string) *model.Diff {
 		}
 	}
 	return nil
-}
-
-// collectPendingComments waits for any async workers then returns aggregated comments from the collector.
-func (a *Agent) collectPendingComments() []model.LlmComment {
-	if a.args.CommentWorkerPool != nil {
-		a.args.CommentWorkerPool.Await()
-	}
-	return a.args.CommentCollector.Comments()
-}
-
-// addNextMessage adds assistant + tool response messages to the conversation history.
-// Implements dual-threshold compression:
-//   - 60% of MaxTokens: trigger async background compression (non-blocking)
-//   - 80% of MaxTokens: perform synchronous compression immediately
-func (a *Agent) addNextMessage(ctx context.Context, assistantContent string, toolCalls []llm.ToolCall, results []tool.ToolCallResult, messages *[]llm.Message, filePath string) bool {
-	maxAllowed := a.args.Template.MaxTokens
-	softLimit := int(float64(maxAllowed) * tokenSoftThreshold)
-	warnLimit := int(float64(maxAllowed) * tokenWarningThreshold)
-
-	// Try to apply any completed async compression from a previous iteration.
-	a.tryApplyPendingCompression(messages)
-
-	tokenCount := countMessagesTokens(*messages)
-
-	// Hard threshold: synchronous compression.
-	if tokenCount > warnLimit {
-		a.cancelPendingCompression()
-		*messages, _ = a.runCompression(ctx, *messages, filePath)
-		tokenCount = countMessagesTokens(*messages)
-	}
-
-	// Soft threshold: async compression.
-	if tokenCount > softLimit && a.pendingJob == nil {
-		a.triggerAsyncCompression(ctx, *messages, filePath)
-	}
-
-	// Add assistant message with tool_calls when present.
-	if len(toolCalls) > 0 {
-		*messages = append(*messages, llm.NewToolCallMessage(assistantContent, toolCalls))
-	} else if assistantContent != "" {
-		*messages = append(*messages, llm.NewTextMessage("assistant", assistantContent))
-	}
-
-	// Add tool response messages using Claude's tool_result format.
-	for _, r := range results {
-		*messages = append(*messages, llm.NewToolResultMessage(r.ToolCallID, r.Result))
-	}
-
-	// Final check: compress synchronously if still over warning limit.
-	finalCount := countMessagesTokens(*messages)
-	if finalCount > warnLimit {
-		a.cancelPendingCompression()
-		*messages, _ = a.runCompression(ctx, *messages, filePath)
-	}
-
-	return countMessagesTokens(*messages) < warnLimit
-}
-
-func countMessagesTokens(msgs []llm.Message) int {
-	var total int
-	for _, m := range msgs {
-		total += llm.CountTokens(m.ExtractText())
-	}
-	return total
-}
-
-// groupIntoRounds parses messages[start:] into logical (assistant + tool_results) pairs.
-func groupIntoRounds(messages []llm.Message, start int) []round {
-	var rounds []round
-	i := start
-	for i < len(messages) {
-		if messages[i].Role == "assistant" {
-			r := round{assistantIdx: i}
-			i++
-			for i < len(messages) && messages[i].Role == "tool" {
-				r.toolIdxs = append(r.toolIdxs, i)
-				i++
-			}
-			rounds = append(rounds, r)
-		} else {
-			i++
-		}
-	}
-	return rounds
-}
-
-// computeActiveZoneSize returns how many trailing rounds fit within the remaining
-// token budget after accounting for frozen zone and the compressed summary.
-func computeActiveZoneSize(rounds []round, messages []llm.Message, maxTokens int, reservedTokens int) int {
-	budget := int(float64(maxTokens)*tokenWarningThreshold) - reservedTokens
-	if budget <= 0 {
-		return 0
-	}
-
-	count := 0
-	tokensUsed := 0
-	for i := len(rounds) - 1; i >= 0; i-- {
-		roundTokens := llm.CountTokens(messages[rounds[i].assistantIdx].ExtractText())
-		for _, ti := range rounds[i].toolIdxs {
-			roundTokens += llm.CountTokens(messages[ti].ExtractText())
-		}
-		if tokensUsed+roundTokens > budget {
-			break
-		}
-		tokensUsed += roundTokens
-		count++
-	}
-	return count
-}
-
-// partitionMessages divides messages into frozen, compress, and active zones.
-// Frozen zone is always messages[0:2]. Active zone preserves the K most recent
-// complete rounds based on available token budget.
-func partitionMessages(messages []llm.Message, maxTokens int, prevSummaryTokenEstimate int) partitionResult {
-	result := partitionResult{frozenEnd: 2}
-	if len(messages) <= 2 {
-		result.compressEnd = len(messages)
-		return result
-	}
-
-	result.rounds = groupIntoRounds(messages, 2)
-	if len(result.rounds) == 0 {
-		result.compressEnd = len(messages)
-		return result
-	}
-
-	result.activeCount = computeActiveZoneSize(result.rounds, messages, maxTokens, prevSummaryTokenEstimate)
-	if result.activeCount >= len(result.rounds) {
-		// Everything fits — no compression needed.
-		result.compressEnd = len(messages)
-		result.activeCount = 0
-		return result
-	}
-
-	// compressEnd = index after the last round NOT in active zone.
-	activeStartIdx := len(result.rounds) - result.activeCount
-	lastCompressRound := result.rounds[activeStartIdx-1]
-	if len(lastCompressRound.toolIdxs) > 0 {
-		result.compressEnd = lastCompressRound.toolIdxs[len(lastCompressRound.toolIdxs)-1] + 1
-	} else {
-		result.compressEnd = lastCompressRound.assistantIdx + 1
-	}
-
-	return result
-}
-
-// stripMarkdownFences removes ```json and ``` wrappers that some models
-// add around structured outputs.
-func stripMarkdownFences(s string) string {
-	s = strings.TrimSpace(s)
-	if strings.HasPrefix(s, "```") {
-		if nl := strings.IndexByte(s, '\n'); nl >= 0 {
-			s = s[nl+1:]
-		} else {
-			s = strings.TrimPrefix(s, "```json")
-			s = strings.TrimPrefix(s, "```")
-		}
-	}
-	s = strings.TrimSpace(s)
-	if strings.HasSuffix(s, "```") {
-		s = strings.TrimSuffix(s, "```")
-		s = strings.TrimSpace(s)
-	}
-	return s
-}
-
-// runCompression performs three-zone memory compression on the given messages.
-// It summarizes the compress zone while preserving the active zone intact.
-// Returns the rebuilt messages slice: [frozen] + [compressed_summary] + [active].
-func (a *Agent) runCompression(ctx context.Context, msgs []llm.Message, filePath string) ([]llm.Message, error) {
-	if len(a.args.Template.MemoryCompressionTask.Messages) == 0 || len(msgs) <= 2 {
-		return msgs[:min(len(msgs), 2)], nil
-	}
-
-	part := partitionMessages(msgs, a.args.Template.MaxTokens, 0)
-	if part.compressEnd <= part.frozenEnd {
-		return msgs, nil
-	}
-
-	contextXML := buildMessageXML(msgs[part.frozenEnd:part.compressEnd])
-
-	compressionMsgs := make([]llm.Message, 0, len(a.args.Template.MemoryCompressionTask.Messages))
-	for _, m := range a.args.Template.MemoryCompressionTask.Messages {
-		content := strings.ReplaceAll(m.Content, "{{context}}", contextXML)
-		compressionMsgs = append(compressionMsgs, llm.NewTextMessage(m.Role, content))
-	}
-
-	startTime := time.Now()
-	resp, err := a.args.LLMClient.CompletionsWithCtx(ctx, llm.ChatRequest{
-		Model:     a.args.Model,
-		Messages:  compressionMsgs,
-		MaxTokens: a.args.Template.MaxTokens,
-	})
-	duration := time.Since(startTime)
-
-	fs := a.session.GetOrCreateFileSession(filePath)
-	rec := fs.AppendTaskRecord(session.MemoryCompressionTask, compressionMsgs)
-	if err != nil {
-		rec.SetError(err, duration)
-		fmt.Fprintf(stdout.Writer(), "[ocr] Memory compression failed: %v\n", err)
-		return msgs[:part.frozenEnd], fmt.Errorf("memory compression: %w", err)
-	}
-	rec.SetResponse(resp, duration)
-	if resp.Usage != nil {
-		atomic.AddInt64(&a.totalInputTokens, resp.Usage.PromptTokens)
-		atomic.AddInt64(&a.totalOutputTokens, resp.Usage.CompletionTokens)
-		atomic.AddInt64(&a.totalCacheReadTokens, resp.Usage.CacheReadTokens)
-		atomic.AddInt64(&a.totalCacheWriteTokens, resp.Usage.CacheWriteTokens)
-	}
-
-	rawSummary := stripMarkdownFences(resp.Content())
-	if rawSummary == "" {
-		return msgs[:part.frozenEnd], nil
-	}
-
-	rebuilt := make([]llm.Message, 2)
-	copy(rebuilt, msgs[:2])
-
-	userMsg := rebuilt[1]
-	currentText := userMsg.ExtractText()
-	rebuilt[1] = llm.NewTextMessage(userMsg.Role, currentText+"\n\n<previous_review_summary>\n"+rawSummary+"\n</previous_review_summary>")
-
-	for i := part.compressEnd; i < len(msgs); i++ {
-		rebuilt = append(rebuilt, msgs[i])
-	}
-
-	return rebuilt, nil
-}
-
-// triggerAsyncCompression kicks off a background compression job.
-func (a *Agent) triggerAsyncCompression(ctx context.Context, messages []llm.Message, filePath string) {
-	msgSnapshot := copyMessages(messages)
-
-	asyncCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Minute)
-
-	job := &compressionJob{done: make(chan struct{}), cancel: cancel}
-	a.compressionMu.Lock()
-	a.pendingJob = job
-	a.compressionMu.Unlock()
-
-	go func() {
-		defer cancel()
-		rebuilt, _ := a.runCompression(asyncCtx, msgSnapshot, filePath)
-
-		a.compressionMu.Lock()
-		defer a.compressionMu.Unlock()
-
-		if a.pendingJob != job {
-			return // cancelled or superseded
-		}
-		job.rebuilt = rebuilt
-		close(job.done)
-	}()
-}
-
-// tryApplyPendingCompression checks if a background compression completed
-// and swaps the rebuilt messages into place. Returns true if applied.
-func (a *Agent) tryApplyPendingCompression(messages *[]llm.Message) bool {
-	a.compressionMu.Lock()
-	job := a.pendingJob
-	a.compressionMu.Unlock()
-
-	if job == nil {
-		return false
-	}
-
-	select {
-	case <-job.done:
-		a.compressionMu.Lock()
-		if a.pendingJob == job && job.rebuilt != nil {
-			*messages = job.rebuilt
-			a.pendingJob = nil
-		}
-		a.compressionMu.Unlock()
-		return true
-	default:
-		return false
-	}
-}
-
-// cancelPendingCompression aborts any in-flight background compression.
-func (a *Agent) cancelPendingCompression() {
-	a.compressionMu.Lock()
-	defer a.compressionMu.Unlock()
-
-	if a.pendingJob != nil {
-		a.pendingJob.cancel()
-		a.pendingJob = nil
-	}
-}
-
-// copyMessages creates a shallow copy of a message slice.
-func copyMessages(msgs []llm.Message) []llm.Message {
-	out := make([]llm.Message, len(msgs))
-	copy(out, msgs)
-	return out
 }
 
 // BuildToolDefs converts toolsconfig.ToolConfigEntry slice into []llm.ToolDef,
@@ -1340,39 +1571,4 @@ func BuildToolDefs(entries []toolsconfig.ToolConfigEntry, planOnly bool) []llm.T
 		})
 	}
 	return defs
-}
-
-func buildMessageXML(msgs []llm.Message) string {
-	var sb strings.Builder
-	for i, m := range msgs {
-		sb.WriteString(fmt.Sprintf("<message id=\"%d\" role=\"%s\">\n", i, m.Role))
-		sb.WriteString("    <content>\n")
-		sb.WriteString(fmt.Sprintf("      %s\n", m.ExtractText()))
-		sb.WriteString("    </content>\n")
-		sb.WriteString("</message>")
-		if i < len(msgs)-1 {
-			sb.WriteString("\n")
-		}
-	}
-	return sb.String()
-}
-
-func reviewModeString(from, to, commit string) string {
-	if commit != "" {
-		return session.ReviewModeCommit
-	}
-	if from != "" && to != "" {
-		return session.ReviewModeRange
-	}
-	return session.ReviewModeWorkspace
-}
-
-// detectGitBranch returns the current git branch name for the given repo, or empty string on failure.
-func detectGitBranch(repoDir string) string {
-	cmd := exec.Command("git", "-C", repoDir, "rev-parse", "--abbrev-ref", "HEAD")
-	out, err := cmd.Output()
-	if err != nil || len(out) == 0 {
-		return ""
-	}
-	return strings.TrimSpace(string(out))
 }

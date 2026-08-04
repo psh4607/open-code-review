@@ -3,7 +3,7 @@ package diff
 import (
 	"strings"
 
-	"github.com/open-code-review/open-code-review/internal/model"
+	"github.com/alibaba/open-code-review/internal/model"
 )
 
 // ResolveLineNumbers populates StartLine/EndLine on each comment by matching
@@ -165,7 +165,7 @@ func matchConsecutive(sideLines []indexedLine, targetLines []string) (startLine,
 }
 
 // resolveFromFileContent scans the new file content line-by-line for consecutive
-// matches of the normalized existing_code. Ported from Java's findConsecutiveLines.
+// matches of the normalized existing_code.
 func resolveFromFileContent(d *model.Diff, cm *model.LlmComment) bool {
 	if d.NewFileContent == "" {
 		return false
@@ -173,21 +173,39 @@ func resolveFromFileContent(d *model.Diff, cm *model.LlmComment) bool {
 
 	fileLines := strings.Split(d.NewFileContent, "\n")
 	targetLines := splitAndNormalize(cm.ExistingCode)
-	if len(targetLines) == 0 || len(fileLines) < len(targetLines) {
+	if len(targetLines) == 0 {
 		return false
 	}
 
-	for i := 0; i <= len(fileLines)-len(targetLines); i++ {
+	// Normalize file lines the same way as target: skip blanks so that
+	// blank lines in the source don't break the sliding-window match.
+	// "Consecutive" here means adjacent non-blank lines.
+	normalizedFileLines := make([]string, 0, len(fileLines))
+	fileLineNums := make([]int, 0, len(fileLines))
+	for i, line := range fileLines {
+		n := normalizeLine(strings.TrimRight(line, "\r"))
+		if n == "" {
+			continue
+		}
+		normalizedFileLines = append(normalizedFileLines, n)
+		fileLineNums = append(fileLineNums, i+1)
+	}
+
+	if len(normalizedFileLines) < len(targetLines) {
+		return false
+	}
+
+	for i := 0; i <= len(normalizedFileLines)-len(targetLines); i++ {
 		matched := true
 		for j, target := range targetLines {
-			if normalizeLine(strings.TrimRight(fileLines[i+j], "\r")) != target {
+			if normalizedFileLines[i+j] != target {
 				matched = false
 				break
 			}
 		}
 		if matched {
-			cm.StartLine = i + 1
-			cm.EndLine = i + len(targetLines)
+			cm.StartLine = fileLineNums[i]
+			cm.EndLine = fileLineNums[i+len(targetLines)-1]
 			return true
 		}
 	}
@@ -210,7 +228,7 @@ func splitAndNormalize(code string) []string {
 }
 
 // normalizeLine removes leading/trailing whitespace and strips any leading
-// '+' or '-' diff marker (mirrors Java's processTargetLineCode).
+// '+' or '-' diff marker.
 func normalizeLine(s string) string {
 	s = strings.TrimSpace(s)
 	s = strings.TrimPrefix(s, "+")

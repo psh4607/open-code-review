@@ -4,9 +4,44 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 
-	"github.com/open-code-review/open-code-review/internal/model"
+	"github.com/alibaba/open-code-review/internal/model"
 )
+
+const (
+	codeCommentCategoryBug             = "bug"
+	codeCommentCategorySecurity        = "security"
+	codeCommentCategoryPerformance     = "performance"
+	codeCommentCategoryMaintainability = "maintainability"
+	codeCommentCategoryTest            = "test"
+	codeCommentCategoryStyle           = "style"
+	codeCommentCategoryDocumentation   = "documentation"
+	codeCommentCategoryOther           = "other"
+
+	codeCommentSeverityCritical = "critical"
+	codeCommentSeverityHigh     = "high"
+	codeCommentSeverityMedium   = "medium"
+	codeCommentSeverityLow      = "low"
+)
+
+var validCodeCommentCategories = map[string]struct{}{
+	codeCommentCategoryBug:             {},
+	codeCommentCategorySecurity:        {},
+	codeCommentCategoryPerformance:     {},
+	codeCommentCategoryMaintainability: {},
+	codeCommentCategoryTest:            {},
+	codeCommentCategoryStyle:           {},
+	codeCommentCategoryDocumentation:   {},
+	codeCommentCategoryOther:           {},
+}
+
+var validCodeCommentSeverities = map[string]struct{}{
+	codeCommentSeverityCritical: {},
+	codeCommentSeverityHigh:     {},
+	codeCommentSeverityMedium:   {},
+	codeCommentSeverityLow:      {},
+}
 
 // CodeCommentProvider submits review comments to the per-Agent CommentCollector.
 type CodeCommentProvider struct {
@@ -38,7 +73,9 @@ func ParseComments(args map[string]any) ([]model.LlmComment, string) {
 	if arr, ok := args["comments"].([]any); ok && len(arr) > 0 {
 		rawComments = arr
 	} else if s, ok := args["comments"].(string); ok && s != "" {
-		_ = json.Unmarshal([]byte(s), &rawComments)
+		if err := json.Unmarshal([]byte(s), &rawComments); err != nil {
+			return nil, fmt.Sprintf("Error: failed to parse 'comments' JSON string: %v", err)
+		}
 	}
 	if len(rawComments) == 0 {
 		raw, _ := json.Marshal(args)
@@ -66,6 +103,12 @@ func ParseComments(args map[string]any) ([]model.LlmComment, string) {
 		if thinking, ok := obj["thinking"].(string); ok {
 			cm.Thinking = thinking
 		}
+		if category, ok := obj["category"].(string); ok {
+			cm.Category = normalizeCodeCommentCategory(category)
+		}
+		if severity, ok := obj["severity"].(string); ok {
+			cm.Severity = normalizeCodeCommentSeverity(severity)
+		}
 		if path, ok := args["path"].(string); ok {
 			cm.Path = path
 		}
@@ -77,4 +120,20 @@ func ParseComments(args map[string]any) ([]model.LlmComment, string) {
 		comments = append(comments, cm)
 	}
 	return comments, ""
+}
+
+func normalizeCodeCommentCategory(category string) string {
+	normalized := strings.ToLower(category)
+	if _, ok := validCodeCommentCategories[normalized]; ok {
+		return normalized
+	}
+	return codeCommentCategoryOther
+}
+
+func normalizeCodeCommentSeverity(severity string) string {
+	normalized := strings.ToLower(severity)
+	if _, ok := validCodeCommentSeverities[normalized]; ok {
+		return normalized
+	}
+	return codeCommentSeverityLow
 }

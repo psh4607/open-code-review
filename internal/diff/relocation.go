@@ -6,10 +6,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/open-code-review/open-code-review/internal/config/template"
-	"github.com/open-code-review/open-code-review/internal/llm"
-	"github.com/open-code-review/open-code-review/internal/model"
-	"github.com/open-code-review/open-code-review/internal/stdout"
+	"github.com/alibaba/open-code-review/internal/config/template"
+	"github.com/alibaba/open-code-review/internal/llm"
+	"github.com/alibaba/open-code-review/internal/model"
+	"github.com/alibaba/open-code-review/internal/stdout"
+	"github.com/alibaba/open-code-review/internal/telemetry"
 )
 
 // ReLocateComment calls the LLM to regenerate a precise existing_code snippet
@@ -29,12 +30,6 @@ func ReLocateComment(
 		return false, nil, nil
 	}
 
-	if task.Timeout > 0 {
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, time.Duration(task.Timeout)*time.Second)
-		defer cancel()
-	}
-
 	messages := make([]llm.Message, 0, len(task.Messages))
 	for _, m := range task.Messages {
 		content := m.Content
@@ -44,15 +39,26 @@ func ReLocateComment(
 		messages = append(messages, llm.NewTextMessage(m.Role, content))
 	}
 
+	startTime := time.Now()
+	_, llmSpan := telemetry.StartLLMSpan(ctx, modelName)
 	resp, err := client.CompletionsWithCtx(ctx, llm.ChatRequest{
 		Model:     modelName,
 		Messages:  messages,
 		MaxTokens: maxTokens,
 	})
+	duration := time.Since(startTime)
 	if err != nil {
+		telemetry.RecordLLMResult(llmSpan, duration, 0, err)
+		llmSpan.End()
 		fmt.Fprintf(stdout.Writer(), "[ocr] Re-location LLM call failed for %s: %v\n", cm.Path, err)
 		return false, nil, messages
 	}
+	var totalTokens int64
+	if resp.Usage != nil {
+		totalTokens = resp.Usage.TotalTokens
+	}
+	telemetry.RecordLLMResult(llmSpan, duration, totalTokens, nil)
+	llmSpan.End()
 
 	code := extractCodeBlock(resp.Content())
 	if code == "" {

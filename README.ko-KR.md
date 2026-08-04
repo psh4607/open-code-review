@@ -1,17 +1,35 @@
+<div align="center">
+  <a href="https://open-codereview.ai">
+    <img src="imgs/logo-core.svg" alt="OpenCodeReview logo" width="180" />
+  </a>
+  <h1>OpenCodeReview</h1>
+</div>
+
 <p align="center">
-  <a href="https://alibaba.github.io/open-code-review/">
-    <img src="imgs/logo.svg" alt="OpenCodeReview logo" width="240" height="240">
+  <a href="https://trendshift.io/repositories/41087?utm_source=repository-badge&amp;utm_medium=badge&amp;utm_campaign=badge-repository-41087" target="_blank" rel="noopener noreferrer">
+    <img src="https://trendshift.io/api/badge/repositories/41087" alt="alibaba%2Fopen-code-review | Trendshift" style="width: 280px; height: 60px;" width="280" height="60" />
+  </a>
+  <a href="https://trendshift.io/repositories/41087" target="_blank">
+    <img src="https://trendshift.io/api/badge/trendshift/repositories/41087/weekly?language=Go" alt="alibaba%2Fopen-code-review | Trendshift" style="width: 280px; height: 60px;" width="280" height="60" />
   </a>
 </p>
-<p align="center">오픈 소스 AI 코드 리뷰 에이전트.</p>
 <p align="center">
   <a href="https://www.npmjs.com/package/@alibaba-group/open-code-review"><img alt="npm" src="https://img.shields.io/npm/v/@alibaba-group/open-code-review?style=flat-square" /></a>
   <a href="https://github.com/alibaba/open-code-review/actions/workflows/release.yml"><img alt="Build status" src="https://img.shields.io/github/actions/workflow/status/alibaba/open-code-review/release.yml?style=flat-square" /></a>
-  <a href="https://goreportcard.com/report/github.com/alibaba/open-code-review"><img alt="Go Report Card" src="https://goreportcard.com/badge/github.com/alibaba/open-code-review?style=flat-square" /></a>
   <a href="https://github.com/alibaba/open-code-review/blob/main/LICENSE"><img alt="License" src="https://img.shields.io/github/license/alibaba/open-code-review?style=flat-square" /></a>
+  <a href="https://deepwiki.com/alibaba/open-code-review"><img alt="Ask DeepWiki" src="https://deepwiki.com/badge.svg" /></a>
+  <a href="https://www.bestpractices.dev/projects/13328"><img alt="OpenSSF Best Practices" src="https://img.shields.io/badge/OpenSSF-Silver-4C566A?style=flat-square" /></a>
 </p>
 <p align="center">
-  <a href="README.md">English</a> | <a href="README.zh-CN.md">简体中文</a> | <a href="README.ja-JP.md">日本語</a> | 한국어
+  <a href="#supported-platforms"><img alt="Windows" src="https://img.shields.io/badge/Windows-supported-blue.svg" /></a>
+  <a href="#supported-platforms"><img alt="macOS" src="https://img.shields.io/badge/macOS-supported-blue.svg" /></a>
+  <a href="#supported-platforms"><img alt="Linux" src="https://img.shields.io/badge/Linux-supported-blue.svg" /></a>
+  <a href="#supported-agents"><img alt="Claude Code" src="https://img.shields.io/badge/Claude_Code-supported-blueviolet.svg" /></a>
+  <a href="#supported-agents"><img alt="Codex" src="https://img.shields.io/badge/Codex-supported-blueviolet.svg" /></a>
+  <a href="#supported-agents"><img alt="Cursor" src="https://img.shields.io/badge/Cursor-supported-blueviolet.svg" /></a>
+</p>
+<p align="center">
+  <a href="README.md">English</a> | <a href="README.zh-CN.md">简体中文</a> | <a href="README.ja-JP.md">日本語</a> | 한국어 | <a href="README.ru-RU.md">Русский</a>
 </p>
 
 ---
@@ -20,9 +38,27 @@
 
 Open Code Review는 AI 기반 코드 리뷰 CLI 도구입니다. Alibaba Group의 내부 공식 AI 코드 리뷰 어시스턴트에서 시작했으며, 지난 2년 동안 수만 명의 개발자에게 제공되어 수백만 건의 코드 결함을 찾아냈습니다. 대규모 환경에서 충분히 검증한 뒤 커뮤니티를 위해 오픈 소스 프로젝트로 공개했습니다. 모델 endpoint만 설정하면 바로 사용할 수 있습니다.
 
-이 도구는 Git diff를 읽고, 변경 파일을 tool-use 기능을 가진 agent를 통해 설정 가능한 LLM으로 전달한 뒤, 라인 단위 위치 정보가 포함된 구조화된 리뷰 코멘트를 생성합니다. agent는 전체 파일 내용 읽기, 코드베이스 검색, 다른 변경 파일 확인 등을 통해 맥락을 확보하고 표면적인 diff 피드백이 아닌 깊이 있는 리뷰를 수행할 수 있습니다.
+이 도구는 Git diff를 읽고, 변경 파일을 tool-use 기능을 가진 agent를 통해 설정 가능한 LLM으로 전달한 뒤, 라인 단위 위치 정보가 포함된 구조화된 리뷰 코멘트를 생성합니다. agent는 전체 파일 내용 읽기, 코드베이스 검색, 다른 변경 파일 확인 등을 통해 맥락을 확보하고 표면적인 diff 피드백이 아닌 깊이 있는 리뷰를 수행할 수 있습니다. diff 리뷰 외에도 `ocr scan`은 전체 파일을 리뷰할 수 있어, 익숙하지 않은 코드베이스를 감사하거나 의미 있는 diff가 없는 디렉터리를 검토하는 데 유용합니다.
+
+자세한 내용은 [공식 웹사이트](https://open-codereview.ai)를 참조하세요.
 
 ![Highlights](imgs/highlights-en.png)
+
+## 벤치마크
+
+> 범용 Agent(Claude Code)와 비교할 때, Open Code Review는 동일한 기반 모델에서 유의미하게 높은 **정밀도(Precision)**와 **F1 점수**를 달성하며, 토큰 소비량은 **약 1/9** 수준이고 리뷰 속도도 더 빠릅니다. 다만 재현율(Recall)은 범용 Agent보다 낮습니다 — 이는 노이즈를 줄이고 정밀도를 우선하는 설계적 트레이드오프입니다.
+
+실제 코드 리뷰 기반 벤치마크. **50**개 인기 오픈소스 저장소에서 **200**개 실제 Pull Request를 엄선하고, **10**개 프로그래밍 언어를 커버 — 80명 이상의 시니어 엔지니어가 교차 검증(**1,505**개 어노테이션된 결함).
+
+| 지표 | 측정 내용 | 중요한 이유 |
+|------|-----------|-------------|
+| **F1** | 정밀도와 재현율의 조화 평균 | 리뷰 품질을 나타내는 최적의 단일 지표 |
+| **정밀도 (Precision)** | 보고된 이슈 중 실제 결함 비율 | 높을수록 확인할 오탐이 적음 |
+| **재현율 (Recall)** | 실제 결함 중 발견된 비율 | 높을수록 놓치는 이슈가 적음 |
+| **평균 시간 (Avg Time)** | 리뷰당 실제 소요 시간 | CI 파이프라인 대기 시간에 영향 |
+| **평균 토큰 (Avg Token)** | 리뷰당 총 토큰 소비량 | API 비용에 직접 영향 |
+
+![Benchmark](imgs/benchmark-en.png)
 
 ## 왜 Open Code Review인가?
 
@@ -58,11 +94,13 @@ agent의 강점은 동적 판단과 동적 context 검색이 중요한 지점에
 
 ## 사용 방법
 
+### 사전 요구 사항
+
+- **Git >= 2.41** — Open Code Review는 diff 생성, 코드 검색, 저장소 작업에 Git을 사용합니다.
+
 ### CLI
 
 #### 설치
-
-**NPM 사용(권장)**
 
 ```bash
 npm install -g @alibaba-group/open-code-review
@@ -70,81 +108,26 @@ npm install -g @alibaba-group/open-code-review
 
 설치 후 `ocr` 명령을 전역에서 사용할 수 있습니다.
 
-**GitHub Release 사용**
-
-[GitHub Releases](https://github.com/alibaba/open-code-review/releases)에서 최신 binary를 다운로드합니다.
-
-```bash
-# macOS (Apple Silicon)
-curl -Lo ocr https://github.com/alibaba/open-code-review/releases/latest/download/opencodereview-darwin-arm64
-chmod +x ocr && sudo mv ocr /usr/local/bin/ocr
-
-# macOS (Intel)
-curl -Lo ocr https://github.com/alibaba/open-code-review/releases/latest/download/opencodereview-darwin-amd64
-chmod +x ocr && sudo mv ocr /usr/local/bin/ocr
-
-# Linux (x86_64)
-curl -Lo ocr https://github.com/alibaba/open-code-review/releases/latest/download/opencodereview-linux-amd64
-chmod +x ocr && sudo mv ocr /usr/local/bin/ocr
-
-# Linux (ARM64)
-curl -Lo ocr https://github.com/alibaba/open-code-review/releases/latest/download/opencodereview-linux-arm64
-chmod +x ocr && sudo mv ocr /usr/local/bin/ocr
-
-# Windows (x86_64): ocr.exe를 PATH에 포함된 디렉터리로 이동하세요
-curl -Lo ocr.exe https://github.com/alibaba/open-code-review/releases/latest/download/opencodereview-windows-amd64.exe
-
-# Windows (ARM64): ocr.exe를 PATH에 포함된 디렉터리로 이동하세요
-curl -Lo ocr.exe https://github.com/alibaba/open-code-review/releases/latest/download/opencodereview-windows-arm64.exe
-```
-
-**소스에서 빌드**
-
-```bash
-git clone https://github.com/alibaba/open-code-review.git
-cd open-code-review
-make build
-sudo cp dist/opencodereview /usr/local/bin/ocr
-```
+기타 설치 방법(설치 스크립트, GitHub Release binary, 소스 빌드)은 [설치 가이드](https://open-codereview.ai/docs/installation)를 참조하세요.
 
 #### Quick Start
 
 **1. LLM 설정**
 
-**코드 리뷰를 실행하기 전에 반드시 LLM을 설정해야 합니다.**
+코드 리뷰 전에 LLM 설정이 필요합니다. [위임 모드](https://open-codereview.ai/docs/delegate)를 사용하는 경우에는 불필요합니다.
 
 ```bash
-# Option A: 대화형 config
-ocr config set llm.url https://api.anthropic.com/v1/messages
-ocr config set llm.auth_token your-api-key-here
-ocr config set llm.model claude-opus-4-6
-ocr config set llm.use_anthropic true
-
-# Option B: 환경 변수(가장 높은 우선순위)
-export OCR_LLM_URL=https://api.anthropic.com/v1/messages
-export OCR_LLM_TOKEN=your-api-key-here
-export OCR_LLM_MODEL=claude-opus-4-6
-export OCR_USE_ANTHROPIC=true
+ocr config provider          # built-in provider 선택 또는 custom provider 추가
+ocr config model             # 활성 provider의 model 선택
 ```
 
-config는 `~/.opencodereview/config.json`에 저장됩니다.
+![Provider setup](imgs/providers.jpg)
 
-Claude Code 환경 변수(`ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_MODEL`)와도 호환되며, `~/.zshrc` / `~/.bashrc`의 export도 파싱합니다.
+대화형 UI가 provider 선택, API key 입력, model 설정을 안내하며, 완료 후 자동으로 연결 테스트를 수행합니다.
 
-> **CC-Switch 사용자 참고**: [CC-Switch](https://github.com/farion1231/cc-switch)를 [routing service](https://www.ccswitch.io/en/docs?section=proxy&item=service)와 함께 사용한다면, 추가 설정 없이 `llm.url`을 CC-Switch proxy 주소로 지정할 수 있습니다.
-> - **Claude** provider: `llm.url`을 `http://127.0.0.1:15721`로 설정
-> - **CodeX** provider: `llm.url`을 `http://127.0.0.1:15721/v1`로 설정
-> - provider 설정에 맞게 `llm.model` 설정
-> - `llm.auth_token`은 아무 값이나 사용할 수 있음
-> - `extra_body` 설정은 그대로 적용됨
+CLI 설정, 환경 변수, 커스텀 provider 등 고급 설정은 [설정 가이드](https://open-codereview.ai/docs/configuration)를 참조하세요.
 
-**2. 연결 테스트**
-
-```bash
-ocr llm test
-```
-
-**3. 리뷰 실행**
+**2. 리뷰 실행**
 
 ```bash
 cd your-project
@@ -157,258 +140,53 @@ ocr review --from main --to feature-branch
 
 # 단일 commit
 ocr review --commit abc123
+
+# 중단된 range 또는 단일 commit review 재개
+ocr session list
+ocr review --from main --to feature-branch --resume <session-id>
+
+# 전체 파일 스캔 — diff 대신 파일 전체를 리뷰 (git 이력 불필요)
+ocr scan                          # 전체 repository 스캔
+ocr scan --path internal/agent    # 디렉터리 또는 특정 파일 스캔
+ocr scan --resume <session-id>   # 중단된 전체 파일 스캔 재개
+
+# 위임 모드 — AI 코딩 에이전트가 직접 리뷰 수행
+# OCR은 파일 선택과 규칙 해석만 담당; LLM 설정 불필요
+ocr delegate preview
+ocr delegate rule src/main.go src/handler.go
 ```
 
-### Coding Agent와 통합
-
-OCR은 AI coding agent에 slash command로 자연스럽게 통합할 수 있으며, agent workflow 안에서 바로 코드 리뷰를 실행할 수 있습니다.
-
-#### Option 1: Skill로 설치
-
-`npx`로 OCR skill을 프로젝트에 설치합니다.
-
-```bash
-npx skills add alibaba/open-code-review --skill open-code-review
-```
-
-이 명령은 [skills registry](skills/open-code-review/SKILL.md)의 `open-code-review` skill을 설치합니다. 이 skill은 coding agent가 `ocr`을 호출해 코드 리뷰를 수행하고, issue를 우선순위별로 분류하며, 필요한 경우 fix를 적용하는 방법을 알려줍니다.
-
-#### Option 2: Claude Code Plugin으로 설치
-
-[Claude Code](https://docs.anthropic.com/en/docs/claude-code)에서는 Claude Code 안에서 다음 명령으로 command plugin을 설치합니다.
-
-```bash
-/plugin marketplace add alibaba/open-code-review
-/plugin install open-code-review@open-code-review
-```
-
-이렇게 하면 OCR을 실행하고 issue를 자동으로 필터링 및 수정하는 `/open-code-review:review` slash command가 등록됩니다.
-
-#### Option 3: Codex Plugin으로 설치
-
-local Codex에서는 이 repository에서 Open Code Review plugin을 설치합니다.
-
-```bash
-codex plugin marketplace add alibaba/open-code-review
-codex
-/plugins
-```
-
-local checkout이나 fork에서는 다음을 사용할 수 있습니다.
-
-```bash
-codex plugin marketplace add .
-codex
-/plugins
-```
-
-`Open Code Review`를 설치하고 활성화한 뒤, 새 Codex thread를 시작해 명시적으로 호출합니다.
-
-```text
-@Open Code Review review my current changes
-@Open Code Review review this branch against main
-@Open Code Review review and fix high-confidence issues
-```
-
-이 plugin은 local OCR CLI를 실행하는 Codex skill을 등록합니다.
-
-```bash
-ocr review --audience agent
-```
-
-이 통합은 OCR의 내부 LLM backend를 변경하지 않으며 Codex용 OpenAI Responses API endpoint 설정을 요구하지 않습니다. OCR 자체는 CLI 설정 섹션에 설명된 대로 `ocr` CLI 설치와 설정이 필요합니다.
-
-한국어 가이드: [`plugins/open-code-review/CODEX.ko-KR.md`](plugins/open-code-review/CODEX.ko-KR.md)
-
-#### Option 4: Command 파일 직접 복사
-
-package manager 없이 빠르게 설정하려면 command 파일을 복사해 Claude Code에서 `/open-code-review` slash command를 사용할 수 있습니다.
-
-**Project-level**(git으로 팀과 공유):
-
-```bash
-mkdir -p .claude/commands
-curl -o .claude/commands/open-code-review.md \
-  https://raw.githubusercontent.com/alibaba/open-code-review/main/plugins/open-code-review/commands/review.md
-```
-
-**User-level**(여러 프로젝트에서 개인 전역 사용):
-
-```bash
-mkdir -p ~/.claude/commands
-curl -o ~/.claude/commands/open-code-review.md \
-  https://raw.githubusercontent.com/alibaba/open-code-review/main/plugins/open-code-review/commands/review.md
-```
-
-> **전제 조건**: 모든 통합 방식은 `ocr` CLI가 설치되어 있고 LLM이 설정되어 있어야 합니다. 위의 [설치](#설치)와 [LLM 설정](#1-llm-설정)을 참고하세요.
-
-### CI/CD 통합
-
-OCR은 CI/CD pipeline에 통합해 Merge Request / Pull Request 코드 리뷰를 자동화할 수 있습니다.
-
-CI 통합의 핵심 명령:
-
-```bash
-ocr review \
-  --from "origin/main" \
-  --to "origin/feature-branch" \
-  --format json
-```
-
-`--format json` flag는 CI script에서 파싱하기 좋은 machine-readable 결과를 출력합니다.
-
-통합 예시는 [`examples/`](./examples/) 디렉터리를 참고하세요.
-
-- [`github_actions/`](./examples/github_actions/): GitHub Actions 통합 예시
-- [`gitlab_ci/`](./examples/gitlab_ci/): GitLab CI 통합 예시
-
-## Commands
-
-| Command | Alias | Description |
-|---------|-------|-------------|
-| `ocr review` | `ocr r` | 코드 리뷰 시작 |
-| `ocr rules check <file>` | - | 파일 경로에 적용될 리뷰 rule 미리보기 |
-| `ocr config set <key> <value>` | - | config 값 설정 |
-| `ocr llm test` | - | LLM 연결 테스트 |
-| `ocr viewer` | `ocr v` | `localhost:5483`에서 WebUI session viewer 실행 |
-| `ocr version` | - | version 정보 표시 |
-
-### `ocr review` Flags
-
-| Flag | Shorthand | Default | Description |
-|------|-----------|---------|-------------|
-| `--repo` | - | current dir | Git repository root |
-| `--from` | - | - | Source ref 예: `main` |
-| `--to` | - | - | Target ref 예: `feature-branch` |
-| `--commit` | `-c` | - | 리뷰할 단일 commit |
-| `--preview` | `-p` | `false` | LLM 실행 없이 리뷰 대상 파일 미리보기 |
-| `--format` | `-f` | `text` | Output format: `text` 또는 `json` |
-| `--concurrency` | - | `8` | 최대 동시 파일 리뷰 수 |
-| `--timeout` | - | `10` | 동시 task timeout(분) |
-| `--audience` | - | `human` | `human`(progress 표시) 또는 `agent`(summary only) |
-| `--rule` | - | - | custom JSON review rules 경로 |
-| `--max-tools` | - | built-in | 파일별 최대 tool call round. template default보다 클 때만 적용 |
-| `--max-git-procs` | - | built-in | 최대 동시 git subprocess 수 |
-| `--tools` | - | - | custom JSON tools config 경로 |
-
-## Examples
-
-```bash
-# 리뷰 대상 파일 미리보기(LLM call 없음)
-ocr review --preview
-ocr review -c abc123 -p
-
-# default 설정으로 workspace 변경 리뷰
-ocr review
-
-# 더 높은 concurrency로 branch diff 리뷰
-ocr review --from main --to my-feature --concurrency 4
-
-# 특정 commit을 verbose JSON output으로 리뷰
-ocr review --commit abc123 --format json --audience agent
-
-# custom review rules 사용
-ocr review --rule /path/to/my-rules.json
-
-# 파일에 적용될 rule 미리보기
-ocr rules check src/main/java/com/example/Foo.java
-ocr rules check --rule custom.json src/main/resources/mapper/UserMapper.xml
-
-# browser에서 review session history 보기
-ocr viewer
-ocr viewer --addr :3000
-```
-
-### Viewer 보안
-
-viewer는 session JSONL 내용(LLM request messages와 responses)을 HTTP로 제공합니다. 모든 request에 대해 Host header allowlist를 적용합니다. loopback 이름(`localhost`, `127.0.0.0/8`, `::1`)과 실제 bind host는 항상 허용됩니다. wildcard bind(`--addr :3000`, `--addr 0.0.0.0:3000`)와 다른 non-loopback hostname은 `OCR_VIEWER_ALLOWED_HOSTS` 환경 변수에 comma-separated 값으로 추가해야 합니다.
-
-```bash
-OCR_VIEWER_ALLOWED_HOSTS=review.internal,ocr.lan ocr viewer --addr :3000
-```
-
-이 설정은 local viewer를 대상으로 하는 DNS rebinding 공격을 차단합니다.
-
-## Review Rules
-
-OCR은 네 계층의 priority chain으로 review rule을 해석합니다. 각 계층은 first-match-wins 방식입니다. 파일 경로가 pattern에 match되면 해당 rule을 사용하고, 아니면 다음 계층으로 넘어갑니다.
-
-| Priority | Source | Path | Description |
-|----------|--------|------|-------------|
-| 1 (highest) | `--rule` flag | User-specified path | CLI explicit override |
-| 2 | Project config | `<repoDir>/.opencodereview/rule.json` | project별 rule, git commit 가능 |
-| 3 | Global config | `~/.opencodereview/rule.json` | user-wide 개인 선호 |
-| 4 (lowest) | System default | Embedded `system_rules.json` | 일반 language와 file type을 다루는 built-in rule |
-
-### Rule File Format
-
-모든 계층은 같은 JSON format을 공유합니다.
-
-```json
-{
-  "rules": [
-    {
-      "path": "force-api/**/*.java",
-      "rule": "All new methods must validate required parameters for null values"
-    },
-    {
-      "path": "**/*mapper*.xml",
-      "rule": "Check SQL for injection risks, parameter errors, and missing closing tags"
-    }
-  ]
-}
-```
-
-- `path`는 `**` recursive matching과 `{java,kt}` brace expansion을 지원합니다.
-- 각 계층 안에서는 rule이 선언 순서대로 평가되며 첫 번째 match가 선택됩니다.
-- rule file이 없으면 조용히 건너뜁니다.
-
-## Configuration Reference
-
-Config file: `~/.opencodereview/config.json`
-
-| Key | Type | Example |
-|-----|------|---------|
-| `llm.url` | string | `https://api.openai.com/v1/chat/completions` |
-| `llm.auth_token` | string | `sk-xxxxxxx` |
-| `llm.model` | string | `claude-opus-4-6` |
-| `llm.use_anthropic` | boolean | `true` \| `false` |
-| `language` | string | `English` \| `Chinese` (default: Chinese) |
-| `telemetry.enabled` | boolean | `true` \| `false` |
-| `telemetry.exporter` | string | `console` \| `otlp` |
-| `telemetry.otlp_endpoint` | string | OTLP collector address |
-| `telemetry.content_logging` | boolean | telemetry에 prompt 포함 여부 |
-
-환경 변수는 config file보다 우선합니다.
-
-### Environment Variables
-
-| Variable | Purpose |
-|----------|---------|
-| `OCR_LLM_URL` | LLM API endpoint URL |
-| `OCR_LLM_TOKEN` | API key / auth token |
-| `OCR_LLM_MODEL` | Model name |
-| `OCR_USE_ANTHROPIC` | `true` = Anthropic, `false` = OpenAI |
-
-## Telemetry
-
-관측성을 위한 OpenTelemetry 통합(spans, metrics)입니다. 기본값은 disabled입니다.
-
-```bash
-ocr config set telemetry.enabled true
-ocr config set telemetry.exporter otlp
-ocr config set telemetry.otlp_endpoint localhost:4317
-```
-
-exported data에 LLM prompt와 response를 포함하려면 `telemetry.content_logging`을 설정합니다.
+## Documentation
+
+전체 문서는 **[open-codereview.ai/docs](https://open-codereview.ai/docs)** 에서 확인할 수 있습니다:
+
+- [빠른 시작](https://open-codereview.ai/docs/quickstart) — 설치하고 첫 리뷰 실행하기
+- [설치](https://open-codereview.ai/docs/installation) — 모든 플랫폼 및 패키지 매니저
+- [CLI 레퍼런스](https://open-codereview.ai/docs/cli-reference) — 모든 명령어와 플래그
+- [리뷰 규칙](https://open-codereview.ai/docs/review-rules) — 리뷰 규칙 커스터마이징, 경로 필터링 및 타겟팅
+- [설정](https://open-codereview.ai/docs/configuration) — 설정 키와 환경 변수
+- [MCP 서버](https://open-codereview.ai/docs/mcp) — 외부 도구로 리뷰 에이전트 확장
+- 코딩 에이전트 연동 — 사용하는 플랫폼 선택
+  - [Claude Code](plugins/open-code-review/README.md#claude-code) — 리뷰 슬래시 명령이 포함된 플러그인 설치
+  - [Codex](plugins/open-code-review/README.md#codex) — 호출 가능한 리뷰 스킬이 포함된 플러그인 설치
+  - [Cursor](plugins/open-code-review/README.md#cursor) — 이식 가능한 리뷰 스킬이 포함된 플러그인 설치
+  - [OpenCode](plugins/open-code-review/opencode/README.md) — 네이티브 리뷰 도구와 슬래시 명령 설치
+  - [Skill 호환 에이전트](https://open-codereview.ai/docs/agent-skill) — 이식 가능한 에이전트 스킬 설치
+- 리뷰 실행 모드 — 연동 후 리뷰를 수행할 LLM 선택
+  - [기본 모드(OCR 관리)](https://open-codereview.ai/docs/configuration) — OCR이 설정된 LLM을 사용해 리뷰 수행
+  - [위임 모드](https://open-codereview.ai/docs/delegate) — 코딩 에이전트가 자체 LLM을 사용해 리뷰 수행; OCR API 키 불필요
+- [CI/CD 연동](https://open-codereview.ai/docs/cicd) — GitHub Actions, GitLab CI, GitFlic CI, Gerrit 통합
+- [세션 뷰어](https://open-codereview.ai/docs/viewer) — 브라우저에서 리뷰 세션 탐색 및 재생
+- [텔레메트리](https://open-codereview.ai/docs/telemetry) — 관측성을 위한 OpenTelemetry 통합
+- [FAQ](https://open-codereview.ai/docs/faq) — 자주 묻는 질문과 문제 해결
 
 ## Contributing
 
-개발 환경 설정, coding guideline, pull request 제출 방법은 [CONTRIBUTING.ko-KR.md](CONTRIBUTING.ko-KR.md)를 참고하세요.
+이 프로젝트는 기여해 주신 모든 분들 덕분에 존재합니다. 개발 환경 설정, coding guideline, pull request 제출 방법은 [CONTRIBUTING.ko-KR.md](CONTRIBUTING.ko-KR.md)를 참고하세요.
 
-## Star History
-
-[![Star History Chart](https://api.star-history.com/svg?repos=alibaba/open-code-review&type=Date)](https://star-history.com/#alibaba/open-code-review&Date)
+<a href="https://github.com/alibaba/open-code-review/graphs/contributors">
+  <img src="https://contrib.rocks/image?repo=alibaba/open-code-review" />
+</a>
 
 ## License
 

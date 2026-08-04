@@ -28,6 +28,7 @@
   ".rake",
   ".gemspec",
   ".php",
+  ".phtml",
   ".swift",
   ".m",
   ".mm",
@@ -43,6 +44,10 @@
   ".less",
   ".html",
   ".htm",
+  ".ftl",
+  ".ftlh",
+  ".ftlx",
+  ".astro",
   ".vue",
   ".svelte",
   ".xml",
@@ -65,5 +70,13 @@
   ".ets",
   ".json5",
   ".dart",
-  ".tf"
+  ".tf",
+  ".graphql",
+  ".gql",
+  ".prisma",
+  ".jl",
+  ".hcl",
+  ".tfvars",
+  ".bicep",
+  ".proto"
 ]

@@ -1,17 +1,35 @@
+<div align="center">
+  <a href="https://open-codereview.ai">
+    <img src="imgs/logo-core.svg" alt="OpenCodeReview logo" width="180" />
+  </a>
+  <h1>OpenCodeReview</h1>
+</div>
+
 <p align="center">
-  <a href="https://alibaba.github.io/open-code-review/">
-    <img src="imgs/logo.svg" alt="OpenCodeReview logo" width="240" height="240">
+  <a href="https://trendshift.io/repositories/41087?utm_source=repository-badge&amp;utm_medium=badge&amp;utm_campaign=badge-repository-41087" target="_blank" rel="noopener noreferrer">
+    <img src="https://trendshift.io/api/badge/repositories/41087" alt="alibaba%2Fopen-code-review | Trendshift" style="width: 280px; height: 60px;" width="280" height="60" />
+  </a>
+  <a href="https://trendshift.io/repositories/41087" target="_blank">
+    <img src="https://trendshift.io/api/badge/trendshift/repositories/41087/weekly?language=Go" alt="alibaba%2Fopen-code-review | Trendshift" style="width: 280px; height: 60px;" width="280" height="60" />
   </a>
 </p>
-<p align="center">The open source AI code review agent.</p>
 <p align="center">
   <a href="https://www.npmjs.com/package/@alibaba-group/open-code-review"><img alt="npm" src="https://img.shields.io/npm/v/@alibaba-group/open-code-review?style=flat-square" /></a>
   <a href="https://github.com/alibaba/open-code-review/actions/workflows/release.yml"><img alt="Build status" src="https://img.shields.io/github/actions/workflow/status/alibaba/open-code-review/release.yml?style=flat-square" /></a>
-  <a href="https://goreportcard.com/report/github.com/alibaba/open-code-review"><img alt="Go Report Card" src="https://goreportcard.com/badge/github.com/alibaba/open-code-review?style=flat-square" /></a>
   <a href="https://github.com/alibaba/open-code-review/blob/main/LICENSE"><img alt="License" src="https://img.shields.io/github/license/alibaba/open-code-review?style=flat-square" /></a>
+  <a href="https://deepwiki.com/alibaba/open-code-review"><img alt="Ask DeepWiki" src="https://deepwiki.com/badge.svg" /></a>
+  <a href="https://www.bestpractices.dev/projects/13328"><img alt="OpenSSF Best Practices" src="https://img.shields.io/badge/OpenSSF-Silver-4C566A?style=flat-square" /></a>
 </p>
 <p align="center">
-  <a href="README.md">English</a> | 简体中文 | <a href="README.ja-JP.md">日本語</a> | <a href="README.ko-KR.md">한국어</a>
+  <a href="#supported-platforms"><img alt="Windows" src="https://img.shields.io/badge/Windows-supported-blue.svg" /></a>
+  <a href="#supported-platforms"><img alt="macOS" src="https://img.shields.io/badge/macOS-supported-blue.svg" /></a>
+  <a href="#supported-platforms"><img alt="Linux" src="https://img.shields.io/badge/Linux-supported-blue.svg" /></a>
+  <a href="#supported-agents"><img alt="Claude Code" src="https://img.shields.io/badge/Claude_Code-supported-blueviolet.svg" /></a>
+  <a href="#supported-agents"><img alt="Codex" src="https://img.shields.io/badge/Codex-supported-blueviolet.svg" /></a>
+  <a href="#supported-agents"><img alt="Cursor" src="https://img.shields.io/badge/Cursor-supported-blueviolet.svg" /></a>
+</p>
+<p align="center">
+  <a href="README.md">English</a> | 简体中文 | <a href="README.ja-JP.md">日本語</a> | <a href="README.ko-KR.md">한국어</a> | <a href="README.ru-RU.md">Русский</a>
 </p>
 
 ---
@@ -20,9 +38,27 @@
 
 Open Code Review 是一款 AI 驱动的代码审查 CLI 工具。它的前身是阿里集团内部官方 AI 代码审查助手，过去两年在内部服务了数万开发者，识别了数百万个代码缺陷。经过大规模充分验证后，我们将其孵化为开源项目，对社区开放。只需配置一个模型端点即可使用。
 
-它读取 Git diff，通过具备工具调用能力的 Agent 将变更文件发送至可配置的 LLM，生成具有行级精度的结构化审查意见。Agent 可以读取完整文件内容、搜索代码库、检查其他变更文件以获取上下文，从而进行深度审查——而非仅停留在表面的 diff 反馈。
+它读取 Git diff，通过具备工具调用能力的 Agent 将变更文件发送至可配置的 LLM，生成具有行级精度的结构化审查意见。Agent 可以读取完整文件内容、搜索代码库、检查其他变更文件以获取上下文，从而进行深度审查——而非仅停留在表面的 diff 反馈。除了 diff 审查，`ocr scan` 可以审查整个文件，适用于审计不熟悉的代码库或没有有意义 diff 的目录。
+
+访问[官方网站](https://open-codereview.ai)了解更多信息。
 
 ![Highlights](imgs/highlights-zh.png)
+
+## 基准测试
+
+> 相比通用 Agent（Claude Code），Open Code Review 在相同底层模型下取得了显著更高的 **准确率（Precision）** 与 **F1 综合得分**，同时仅消耗 **约 1/9 的 token**、审查更快。但召回率（Recall）低于通用 Agent——这是以精准度换取低噪声的设计取舍。
+
+基于真实场景的代码审查基准测试，从 **50** 个热门开源仓库中精选 **200** 个真实的 Pull Request，覆盖 **10** 种编程语言——由 80+ 位资深工程师交叉标注验证（共 **1,505** 个标注缺陷）。
+
+| 指标 | 含义 | 为什么重要 |
+|------|------|-----------|
+| **F1** | 准确率与召回率的调和均值 | 综合衡量审查质量的最佳单一指标 |
+| **准确率 (Precision)** | 报告的问题中真正有效的比例 | 越高 = 误报越少，减少人工确认成本 |
+| **召回率 (Recall)** | 真实缺陷中被发现的比例 | 越高 = 漏报越少，更多问题不会遗漏 |
+| **平均耗时 (Avg Time)** | 每次审查的实际耗时 | 决定 CI 流水线的等待时间 |
+| **平均 Token (Avg Token)** | 每次审查消耗的总 token 数 | 直接影响 API 使用成本 |
+
+![Benchmark](imgs/benchmark-zh.png)
 
 ## 为什么选择 Open Code Review？
 
@@ -58,11 +94,13 @@ Open Code Review 的核心设计理念是将确定性工程与 Agent 结合，�
 
 ## 如何使用
 
+### 前置条件
+
+- **Git >= 2.41** — Open Code Review 依赖 Git 进行 diff 生成、代码搜索和仓库操作。
+
 ### CLI
 
 #### 安装
-
-**通过 NPM 安装（推荐）**
 
 ```bash
 npm install -g @alibaba-group/open-code-review
@@ -70,81 +108,26 @@ npm install -g @alibaba-group/open-code-review
 
 安装后，`ocr` 命令即可全局使用。
 
-**从 GitHub Release 下载**
-
-从 [GitHub Releases](https://github.com/alibaba/open-code-review/releases) 下载最新二进制文件：
-
-```bash
-# macOS (Apple Silicon)
-curl -Lo ocr https://github.com/alibaba/open-code-review/releases/latest/download/opencodereview-darwin-arm64
-chmod +x ocr && sudo mv ocr /usr/local/bin/ocr
-
-# macOS (Intel)
-curl -Lo ocr https://github.com/alibaba/open-code-review/releases/latest/download/opencodereview-darwin-amd64
-chmod +x ocr && sudo mv ocr /usr/local/bin/ocr
-
-# Linux (x86_64)
-curl -Lo ocr https://github.com/alibaba/open-code-review/releases/latest/download/opencodereview-linux-amd64
-chmod +x ocr && sudo mv ocr /usr/local/bin/ocr
-
-# Linux (ARM64)
-curl -Lo ocr https://github.com/alibaba/open-code-review/releases/latest/download/opencodereview-linux-arm64
-chmod +x ocr && sudo mv ocr /usr/local/bin/ocr
-
-# Windows (x86_64) — 将 ocr.exe 移动到 PATH 目录中
-curl -Lo ocr.exe https://github.com/alibaba/open-code-review/releases/latest/download/opencodereview-windows-amd64.exe
-
-# Windows (ARM64) — 将 ocr.exe 移动到 PATH 目录中
-curl -Lo ocr.exe https://github.com/alibaba/open-code-review/releases/latest/download/opencodereview-windows-arm64.exe
-```
-
-**从源码构建**
-
-```bash
-git clone https://github.com/alibaba/open-code-review.git
-cd open-code-review
-make build
-sudo cp dist/opencodereview /usr/local/bin/ocr
-```
+其他安装方式（安装脚本、GitHub Release 二进制、源码构建），详见[安装指南](https://open-codereview.ai/docs/installation)。
 
 #### 快速开始
 
 **1. 配置 LLM**
 
-**在审查代码之前，必须先配置 LLM。**
+在审查代码之前，必须先配置 LLM。除非你使用[委托模式](https://open-codereview.ai/docs/delegate)。
 
 ```bash
-# 方式 A：交互式配置
-ocr config set llm.url https://api.anthropic.com/v1/messages
-ocr config set llm.auth_token your-api-key-here
-ocr config set llm.model claude-opus-4-6
-ocr config set llm.use_anthropic true
-
-# 方式 B：环境变量（优先级最高）
-export OCR_LLM_URL=https://api.anthropic.com/v1/messages
-export OCR_LLM_TOKEN=your-api-key-here
-export OCR_LLM_MODEL=claude-opus-4-6
-export OCR_USE_ANTHROPIC=true
+ocr config provider          # 选择内置供应商或添加自定义供应商
+ocr config model             # 为当前供应商选择模型
 ```
 
-配置存储于 `~/.opencodereview/config.json`。
+![Provider setup](imgs/providers.jpg)
 
-同时兼容了 Claude Code 环境变量（`ANTHROPIC_BASE_URL`、`ANTHROPIC_AUTH_TOKEN`、`ANTHROPIC_MODEL`），并解析 `~/.zshrc` / `~/.bashrc` 中的相关导出。
+交互式界面会引导你完成供应商选择、API Key 输入和模型配置，完成后自动测试连通性。
 
-> **CC-Switch 用户特别提醒**：如果你使用 [CC-Switch](https://github.com/farion1231/cc-switch) 并开启了[路由服务](https://www.ccswitch.io/zh/docs?section=proxy&item=service)，可以将 `llm.url` 配置成 CC-Switch 启动的代理地址，无需额外配置：
-> - 如果路由的是 **Claude** 供应商：设置 `llm.url` 为 `http://127.0.0.1:15721`
-> - 如果路由的是 **CodeX** 供应商：设置 `llm.url` 为 `http://127.0.0.1:15721/v1`
-> - `llm.model` 根据你的供应商设置进行配置
-> - `llm.auth_token` 可以设置成任意值
-> - `extra_body` 设置依然生效
+命令行设置、环境变量、自定义供应商等高级配置，详见[配置指南](https://open-codereview.ai/docs/configuration)。
 
-**2. 测试连通性**
-
-```bash
-ocr llm test
-```
-
-**3. 开始审查**
+**2. 开始审查**
 
 ```bash
 cd your-project
@@ -157,291 +140,53 @@ ocr review --from main --to feature-branch
 
 # 单个提交
 ocr review --commit abc123
+
+# 恢复中断的区间或单 commit 评审
+ocr session list
+ocr review --from main --to feature-branch --resume <session-id>
+
+# 全量文件扫描 —— 审查整个文件而非 diff（无需 git 历史）
+ocr scan                          # 扫描整个仓库
+ocr scan --path internal/agent    # 扫描指定目录或文件
+ocr scan --resume <session-id>   # 恢复中断的全量文件扫描
+
+# 委托模式 — 让你的 AI 编程 agent 自己执行评审
+# OCR 负责文件选择和规则解析；无需配置 LLM
+ocr delegate preview
+ocr delegate rule src/main.go src/handler.go
 ```
 
-### 集成到编程 Agent
-
-OCR 可以无缝集成到 AI 编程 Agent 中，作为斜杠命令使用，在 Agent 工作流中直接进行代码审查。
-
-#### 方式一：作为 Skill 安装
-
-使用 `npx` 将 OCR skill 安装到项目中：
-
-```bash
-npx skills add alibaba/open-code-review --skill open-code-review
-```
-
-此命令从 [skills 注册表](skills/open-code-review/SKILL.md)安装 `open-code-review` skill，教会你的编程 Agent 如何调用 `ocr` 进行代码审查、按优先级分类问题，并可选择性地应用修复。
-
-#### 方式二：作为 Claude Code Plugin 安装
-
-对于 [Claude Code](https://docs.anthropic.com/en/docs/claude-code)，在 Claude Code 中通过以下命令安装命令插件：
-
-```bash
-/plugin marketplace add alibaba/open-code-review
-/plugin install open-code-review@open-code-review
-```
-
-此命令注册 `/open-code-review:review` 斜杠命令，运行 OCR 并自动过滤和修复问题。
-
-#### 方式三：作为 Codex Plugin 安装
-
-对于本地 Codex，可以从此仓库安装 Open Code Review plugin：
-
-```bash
-codex plugin marketplace add alibaba/open-code-review
-codex
-/plugins
-```
-
-对于本地 checkout 或 fork：
-
-```bash
-codex plugin marketplace add .
-codex
-/plugins
-```
-
-安装并启用 `Open Code Review` 后，启动新的 Codex thread 并显式调用：
-
-```text
-@Open Code Review review my current changes
-@Open Code Review review this branch against main
-@Open Code Review review and fix high-confidence issues
-```
-
-这会注册一个 Codex skill，用于运行本地 OCR CLI：
-
-```bash
-ocr review --audience agent
-```
-
-此集成不会改变 OCR 的内部 LLM backend，也不需要为 Codex 配置 OpenAI Responses API endpoint。OCR 本身仍需要按照 CLI setup 部分安装并配置 `ocr` CLI。
-
-韩文指南：[`plugins/open-code-review/CODEX.ko-KR.md`](plugins/open-code-review/CODEX.ko-KR.md)
-
-#### 方式四：直接复制命令文件
-
-如果不想使用任何包管理器，可以直接复制命令文件，在 Claude Code 中使用 `/open-code-review` 斜杠命令。
-
-**项目级**（通过 git 与团队共享）：
-
-```bash
-mkdir -p .claude/commands
-curl -o .claude/commands/open-code-review.md \
-  https://raw.githubusercontent.com/alibaba/open-code-review/main/plugins/open-code-review/commands/review.md
-```
-
-**用户级**（个人全局使用，适用于所有项目）：
-
-```bash
-mkdir -p ~/.claude/commands
-curl -o ~/.claude/commands/open-code-review.md \
-  https://raw.githubusercontent.com/alibaba/open-code-review/main/plugins/open-code-review/commands/review.md
-```
-
-> **前置条件**：所有集成方式都需要安装 `ocr` CLI 并配置 LLM。参见上方[安装](#安装)和[配置 LLM](#1-配置-llm)。
-
-### CI/CD 集成
-
-OCR 可以集成到 CI/CD 流水线中，在 Merge Request / Pull Request 时自动进行代码审查。
-
-CI 集成的核心命令：
-
-```bash
-ocr review \
-  --from "origin/main" \
-  --to "origin/feature-branch" \
-  --format json
-```
-
-`--format json` 参数输出适合 CI 脚本解析的机器可读结果。
-
-集成示例请参见 [`examples/`](./examples/) 目录：
-
-- [`github_actions/`](./examples/github_actions/) — GitHub Actions 集成示例
-- [`gitlab_ci/`](./examples/gitlab_ci/) — GitLab CI 集成示例
-
-## 命令
-
-| 命令 | 别名 | 描述 |
-|------|------|------|
-| `ocr review` | `ocr r` | 开始代码审查 |
-| `ocr rules check <file>` | — | 预览某个文件路径生效的审查规则 |
-| `ocr config set <key> <value>` | — | 设置配置项 |
-| `ocr llm test` | — | 测试 LLM 连通性 |
-| `ocr viewer` | `ocr v` | 启动 WebUI 会话查看器，地址 `localhost:5483` |
-| `ocr version` | — | 显示版本信息 |
-
-### `ocr review` 参数
-
-| 参数 | 缩写 | 默认值 | 描述 |
-|------|------|--------|------|
-| `--repo` | — | 当前目录 | Git 仓库根目录 |
-| `--from` | — | — | 源引用（如 `main`） |
-| `--to` | — | — | 目标引用（如 `feature-branch`） |
-| `--commit` | `-c` | — | 审查单个提交 |
-| `--preview` | `-p` | `false` | 预览将被审查的文件列表，不调用 LLM |
-| `--format` | `-f` | `text` | 输出格式：`text` 或 `json` |
-| `--concurrency` | — | `8` | 最大并发文件审查数 |
-| `--timeout` | — | `10` | 并发任务超时时间（分钟） |
-| `--audience` | — | `human` | `human`（显示进度）或 `agent`（仅输出摘要） |
-| `--rule` | — | — | 自定义 JSON 审查规则路径 |
-| `--max-tools` | — | 内置默认 | 每个文件的最大工具调用轮次；仅在大于模板默认值时生效 |
-| `--max-git-procs` | — | 内置默认 | 最大并发 git 子进程数 |
-| `--tools` | — | — | 自定义 JSON 工具配置路径 |
-
-## 示例
-
-```bash
-# 预览将被审查的文件（不调用 LLM）
-ocr review --preview
-ocr review -c abc123 -p
-
-# 使用默认设置审查工作区变更
-ocr review
-
-# 以更高并发审查分支差异
-ocr review --from main --to my-feature --concurrency 4
-
-# 审查特定提交并以 JSON 格式输出详细信息
-ocr review --commit abc123 --format json --audience agent
-
-# 使用自定义审查规则
-ocr review --rule /path/to/my-rules.json
-
-# 预览某个文件路径生效的规则
-ocr rules check src/main/java/com/example/Foo.java
-ocr rules check --rule custom.json src/main/resources/mapper/UserMapper.xml
-
-# 在浏览器中查看审查会话历史
-ocr viewer
-ocr viewer --addr :3000
-```
-
-## 评审规则
-
-OCR 通过四层优先级链解析评审规则。每层采用首次匹配原则：如果文件路径匹配到某个模式，则使用该规则；否则穿透到下一层。
-
-| 优先级 | 来源 | 路径 | 描述 |
-|--------|------|------|------|
-| 1（最高） | `--rule` 参数 | 用户指定路径 | CLI 显式覆盖 |
-| 2 | 项目配置 | `<repoDir>/.opencodereview/rule.json` | 项目级规则，可提交到 git |
-| 3 | 全局配置 | `~/.opencodereview/rule.json` | 用户级个人偏好 |
-| 4（最低） | 系统默认 | 内嵌 `system_rules.json` | 覆盖常见语言和文件类型的内置规则 |
-
-### 规则文件格式
-
-第 1–3 层使用相同的 JSON 格式：
-
-```json
-{
-  "rules": [
-    {
-      "path": "force-api/**/*.java",
-      "rule": "所有新方法必须对必填参数进行空值校验"
-    },
-    {
-      "path": "**/*mapper*.xml",
-      "rule": "检查 SQL 注入风险、参数错误和缺少闭合标签"
-    }
-  ]
-}
-```
-
-- `path` 支持 `**` 递归匹配和 `{java,kt}` 大括号展开。
-- 在每一层内，规则按声明顺序评估 —— 首次匹配生效。
-- 如果规则文件不存在，将被静默跳过。
-
-### 路径过滤
-
-规则文件同时支持 `include` 和 `exclude` 字段，用于控制哪些文件进入审查范围：
-
-```json
-{
-  "rules": [
-    {"path": "**/*.java", "rule": "检查空值安全"}
-  ],
-  "include": ["src/main/**/*.java", "lib/**/*.kt"],
-  "exclude": ["**/generated/**", "vendor/**"]
-}
-```
-
-**过滤决策优先级（从高到低）：**
-
-| 步骤 | 条件 | 结果 |
-|------|------|------|
-| 1 | 文件为二进制文件 | 排除 |
-| 2 | 路径匹配用户 `exclude` 模式 | 排除 |
-| 3 | 文件扩展名不在支持列表中 | 排除 |
-| 4 | 配置了 `include` 且路径匹配 | **纳入审查**（跳过步骤 5） |
-| 5 | 路径匹配内置默认排除模式（测试文件等） | 排除 |
-| 6 | 以上均不满足 | 纳入审查 |
-
-**生效逻辑：**
-
-- `include` 和 `exclude` 遵循与评审规则相同的优先级链（`--rule` > 项目配置 > 全局配置），取**最高优先级中配置了 include/exclude 的那一层**整体生效，不会跨层合并。
-- `exclude` 始终优先于 `include` —— 同时匹配两者的文件会被排除。
-- `include` 的作用是**绕过内置默认排除模式**（如测试文件），而非限制审查范围 —— 未匹配 `include` 的文件仍会正常进入后续的默认过滤判断。
-- 模式语法：支持 `**` 递归匹配、`*` 单级匹配和 `{a,b}` 大括号展开，匹配时不区分大小写。
-
-**内置默认排除模式**（用于过滤测试文件等，可通过 `include` 覆盖）：
-
-```
-**/*_test.go, **/*Test.java, **/*Tests.java, **/*_test.rs,
-**/*.test.{js,jsx,ts,tsx}, **/*.spec.{js,jsx,ts,tsx}, **/__tests__/**,
-**/src/test/java/**/*.java, **/src/test/**/*.kt,
-**/test/**/*_test.py, **/tests/**/*_test.py, **/*_test.py,
-**/*_spec.rb, **/spec/**/*_spec.rb, **/oh_modules/**
-```
-
-## 配置参考
-
-配置文件：`~/.opencodereview/config.json`
-
-| 键 | 类型 | 示例 |
-|----|------|------|
-| `llm.url` | string | `https://api.openai.com/v1/chat/completions` |
-| `llm.auth_token` | string | `sk-xxxxxxx` |
-| `llm.model` | string | `claude-opus-4-6` |
-| `llm.use_anthropic` | boolean | `true` \| `false` |
-| `language` | string | `English` \| `Chinese`（默认：Chinese） |
-| `telemetry.enabled` | boolean | `true` \| `false` |
-| `telemetry.exporter` | string | `console` \| `otlp` |
-| `telemetry.otlp_endpoint` | string | OTLP 采集器地址 |
-| `telemetry.content_logging` | boolean | 在遥测数据中包含提示词 |
-
-环境变量优先级高于配置文件。
-
-### 环境变量
-
-| 变量 | 用途 |
-|------|------|
-| `OCR_LLM_URL` | LLM API 端点 URL |
-| `OCR_LLM_TOKEN` | API 密钥 / 认证令牌 |
-| `OCR_LLM_MODEL` | 模型名称 |
-| `OCR_USE_ANTHROPIC` | `true` = Anthropic，`false` = OpenAI |
-
-
-## 遥测
-
-OpenTelemetry 集成，用于可观测性（spans、metrics）。默认关闭。
-
-```bash
-ocr config set telemetry.enabled true
-ocr config set telemetry.exporter otlp
-ocr config set telemetry.otlp_endpoint localhost:4317
-```
-
-设置 `telemetry.content_logging` 可在导出数据中包含 LLM 提示词和响应。
+## 文档
+
+完整文档见 **[open-codereview.ai/docs](https://open-codereview.ai/docs)**：
+
+- [快速开始](https://open-codereview.ai/docs/quickstart) —— 安装并运行你的第一次评审
+- [安装](https://open-codereview.ai/docs/installation) —— 覆盖各平台与包管理器
+- [CLI 参考](https://open-codereview.ai/docs/cli-reference) —— 所有命令与参数
+- [评审规则](https://open-codereview.ai/docs/review-rules) —— 深度定制规则进行评审，过滤路径、指定路径等
+- [配置](https://open-codereview.ai/docs/configuration) —— 配置项与环境变量
+- [MCP 服务器](https://open-codereview.ai/docs/mcp) —— 用外部工具扩展评审 agent
+- 编程 Agent 集成 —— 选择你使用的平台
+  - [Claude Code](plugins/open-code-review/README.md#claude-code) —— 安装包含评审斜杠命令的插件
+  - [Codex](plugins/open-code-review/README.md#codex) —— 安装包含可调用评审 Skill 的插件
+  - [Cursor](plugins/open-code-review/README.md#cursor) —— 安装包含可移植评审 Skill 的插件
+  - [OpenCode](plugins/open-code-review/opencode/README.md) —— 安装原生评审工具和斜杠命令
+  - [兼容 Skill 的 Agent](https://open-codereview.ai/docs/agent-skill) —— 安装可移植的 Agent Skill
+- 评审执行模式 —— 完成集成后，选择由哪个 LLM 执行评审
+  - [默认模式（OCR 驱动）](https://open-codereview.ai/docs/configuration) —— OCR 使用其已配置的 LLM 执行评审
+  - [委托模式](https://open-codereview.ai/docs/delegate) —— 编程 Agent 使用自身的 LLM 执行评审；无需 OCR API Key
+- [CI/CD 集成](https://open-codereview.ai/docs/cicd) —— 支持 GitHub Actions、GitLab CI、GitFlic CI、Gerrit 集成
+- [会话查看器](https://open-codereview.ai/docs/viewer) —— 在浏览器中浏览和回放评审会话
+- [遥测](https://open-codereview.ai/docs/telemetry) —— OpenTelemetry 集成，用于可观测性
+- [FAQ](https://open-codereview.ai/docs/faq) —— 常见问题与故障排查
 
 ## 贡献
 
-参见 [CONTRIBUTING.zh-CN.md](CONTRIBUTING.zh-CN.md) 了解开发环境搭建、编码规范以及如何提交 Pull Request。
+感谢所有为本项目做出贡献的人。参见 [CONTRIBUTING.zh-CN.md](CONTRIBUTING.zh-CN.md) 了解开发环境搭建、编码规范以及如何提交 Pull Request。
 
-## Star History
-
-[![Star History Chart](https://api.star-history.com/svg?repos=alibaba/open-code-review&type=Date)](https://star-history.com/#alibaba/open-code-review&Date)
+<a href="https://github.com/alibaba/open-code-review/graphs/contributors">
+  <img src="https://contrib.rocks/image?repo=alibaba/open-code-review" />
+</a>
 
 ## 许可证
 
